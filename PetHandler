@@ -1,0 +1,117 @@
+PetHandler.OnServerInvoke = function(player, mode, dataName)
+
+	local DataUpdated = ReplicatedStorage.Remotes.Data.DataUpdated
+
+
+	if mode == "Get" then
+		local PetsEquipped = DataManager.Get(player, "PetsEquipped")
+		local PetsAllowed = DataManager.Get(player, "PetsAllowed")
+		local Inventory = DataManager.Get(player, "Inventories")
+
+		return PetsEquipped, PetsAllowed, Inventory
+	end
+
+
+
+	if mode == "Buy" then
+
+		local PetInfo = PetData.GetPet(dataName)
+		if not PetInfo then return end 
+
+		if PetData.HasPet(player, dataName) then
+			warn("Player already owns pet")
+			return false
+		end
+
+		local playerCash = DataManager.Get(player, "Cash")
+		local price = PetInfo.Price
+
+		if not price then return false end
+
+		if playerCash < price then
+			VisualsHandler.SpawnNotification(player, "Stat", "Cash")
+			return false
+		end
+
+		-- Insert into inventory
+		DataManager.Update(
+			player,
+			"Inventories",
+			{
+				Category = "Pets",
+				Value = dataName
+			},
+			"Insert"
+		)
+
+		DataManager.Update(player, "Cash", -price, "Add")
+
+
+		local newInv = DataManager.Get(player, "Inventories")
+		DataUpdated:FireClient(player, "Inventories", newInv)
+
+		return true
+	end
+
+
+	
+	if mode == "Equip" then
+
+		local inv = DataManager.Get(player, "Inventories")
+		local equipped = DataManager.Get(player, "PetsEquipped")
+		local petsAllowed = DataManager.Get(player, "PetsAllowed")
+
+		-- Must own pet
+		if not table.find(inv.Pets, dataName) then
+			return false
+		end
+
+		-- Already equipped?
+		if table.find(equipped, dataName) then
+			return true, equipped
+		end
+
+		-- If full -> remove oldest
+		if #equipped >= petsAllowed then
+			table.remove(equipped, 1)
+		end
+
+		-- Equip
+		table.insert(equipped, dataName)
+
+		DataManager.Update(player, "PetsEquipped", equipped, "Set")
+
+		-- Give pets in workspace
+		PetData.GivePet(player, equipped)
+
+		-- Tell client equipped pets changed
+		DataUpdated:FireClient(player, "PetsEquipped", equipped)
+
+		return true, equipped
+	end
+
+
+
+	if mode == "Unequip" then
+
+		local equipped = DataManager.Get(player, "PetsEquipped")
+		local index = table.find(equipped, dataName)
+
+		if not index then
+			return false
+		end
+
+		table.remove(equipped, index)
+
+		DataManager.Update(player, "PetsEquipped", equipped, "Set")
+
+		-- Update workspace
+		PetData.GivePet(player, equipped)
+
+		DataUpdated:FireClient(player, "PetsEquipped", equipped)
+
+		return true, equipped
+	end
+
+	return false
+end
