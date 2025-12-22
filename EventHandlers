@@ -144,6 +144,121 @@ SettingsHandler.OnServerInvoke = function(player, mode, dataName) -- Server resp
 end
 
 
+ItemHandler.OnServerInvoke = function(player, mode, dataName) -- Server responds to an InvokeServer from the client --
+
+	local DataUpdated = ReplicatedStorage.Remotes.Data.DataUpdated -- Remote used to update client --
+
+	if mode == "Get" then -- Mode passed through the remotefunction
+		local Inventory = DataManager.Get(player, "Inventories") -- Inventory from data --
+		return Inventory -- Return inventory for whereever it was called (client)
+	end
+
+	if mode == "Amount" then -- Mode passed through the remotefunction
+		local Inventory = DataManager.Get(player, "Inventories")  -- Getting the inventory from the data
+
+		local count = 0 -- Setting the variable --
+		for _, item in pairs(Inventory.Items) do -- Looping through the itmes in inventory and checking if there the dataname if they is multiple it will add to count --
+			if item == dataName then
+				count += 1
+			end
+		end
+
+		return count -- Returning count to identify how many items the player has --
+	end
+
+	if mode == "Use" then -- Mode passed through the remotefunction
+		if not player then return end -- Needs the player for this mode --
+
+		local itemData = dataName -- Setting itemData to have the table of values --
+		local effects = DataManager.Get(player, "Effects") or {} -- Add to current efects or make a empty table --
+
+		
+		local effectKey = nil -- Setting effect key to nil
+		for key, value in pairs(itemData) do -- Looping through the data
+			if typeof(value) == "number" and key ~= "Time" and key ~= "Price" then
+				effectKey = key -- Locating the key we want to match e.g luck or fatgain --
+				break -- End the code --
+			end
+		end
+
+		if not effectKey then -- if theres no key for the item in question return end --
+			warn("Item has no effect field:", itemData.Name) -- Warning for debugging --
+			return
+		end
+
+		local existing = effects[effectKey] -- getting the Existing key in effects
+
+		-- already active → extend duration 
+		if existing and existing.Name == itemData.Name then
+			existing.Remaining += itemData.Time -- Adding the time of the new item
+			DataManager.Update(player, "Effects", effects, "Set") -- Updating the effects --
+			BuffHandler.StartCountdown(player, effectKey) -- Starting the countdown on the client --
+
+			DataManager.Update(player, "Inventories", {Category = "Items", Value = itemData.Name}, "Remove") -- Removing the item from the inventory --
+			return true -- Return true for the client --
+		end
+
+		
+		effects[effectKey] = { -- Key template with generalised statKey and effectKey so the potion/item can have any data type --
+			Amount = itemData[effectKey], -- Amount of Items --
+			Remaining = itemData.Time, -- Time Remaining --
+			Image = itemData.Image, -- Image ID--
+			Name = itemData.Name, -- Name of item --
+			EffectKey = effectKey, -- Name of the key --
+			StatKey = effectKey -- Stat name --
+		}
+
+		DataManager.Update(player, "Effects", effects, "Set") -- Update the effects --
+
+		VisualsHandler.ItemNotification(player, "Item", effects[effectKey]) -- Add the UI effect to the holder --
+		ItemData.RecomputePlayerBuffs(player) -- Add the effects if its first load --
+		BuffHandler.StartCountdown(player, effectKey) -- Start the countdown --
+
+		-- remove item from inventory
+		DataManager.Update(player, "Inventories", {Category = "Items", Value = itemData.Name}, "Remove")
+
+		return true -- Return true for the client --
+	end
+	
+end
+
+
+CodesHandler.OnServerInvoke = function(player, dataName, rewards) -- Server responds to an InvokeServer from the client --
+	local CodeData = DataManager.Get(player, "CodeData") -- Getting the players code data (already redeemed codes)
+	if CodeData.Codes and table.find(CodeData.Codes, dataName) then  -- If they found that the code their trying to redeem is already redeemed spawn in notification --
+		VisualsHandler.SpawnNotification(player, "Code") -- Client side --
+	return end
+	
+	print("Redeemed " .. dataName) -- print for debugging --
+	
+	if rewards.Cash then -- If there is a .Cash value it will add it to the players cash --
+		print("Found Cash Value")
+		DataManager.Update(player, "Cash", rewards.Cash, "Add")
+	end
+	
+	
+	
+	DataManager.Update(player, "CodeData", { -- Inserting the value into codeData so it cannot be claimed again
+		Category = "Codes",
+		Value = dataName}
+	, "Insert")
+
+end
+
+
+RebirthHandler.OnServerInvoke = function(player, mode) -- Server responds to an InvokeServer from the client --
+	if mode == "Rebirth" then -- Checks mode --
+		return RebirthConfig.Rebirth(player) -- If you click rebirth on the button it will fire this rebirthing the player resetting fat and foods esc --
+	end
+	
+	if mode == "Get" then -- Checks mode --
+		return DataManager.Get(player, "Rebirths") -- returns amount of rebirths
+	end
+	
+	return false -- Return false for client if no rebirth happened or get --
+end
+
+
 
 UseFoodEvent.OnServerEvent:Connect(function(player, tool) -- Server responds to an InvokeServer from the client --
 	for _, foodValue in pairs(FoodData.Food) do -- Loops through fooddata.foods
@@ -184,7 +299,7 @@ UseFoodEvent.OnServerEvent:Connect(function(player, tool) -- Server responds to 
 						* DataManager.Get(player, "FatGain") -- Fatgain from data --
 						* totalMultiplier -- Total Multiplier from pets --
 						* rebirthMultiplier -- rebirth multiplier --
-						* 1 -- Another variale if needed --
+						* 1 -- Another variable if needed --
 
 					DataManager.Update(player, "Fat", finalGain, "Add") -- Add the fat that been calculated to the Data --
 					FoodData.SetFat(player, DataManager.Get(player, "Fat")) -- Set the fat immeideitly so we can see the character get bigger --
