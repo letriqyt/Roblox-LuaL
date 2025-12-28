@@ -170,11 +170,12 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 				Sounds[soundObj.Name] = soundClone
 			end
 		end
-	local function LoadVFX()
-		-- Finding the gun folder again to load particle effects
-		local GunFolder = GunAssets:FindFirstChild(GunName)
-		if not GunFolder then
-			warn("No gun assets for:", GunName)
+
+		local function LoadVFX()
+			-- Finding the gun folder again to load particle effects
+			local GunFolder = GunAssets:FindFirstChild(GunName)
+			if not GunFolder then
+				warn("No gun assets for:", GunName)
 			return
 		end
 
@@ -259,7 +260,7 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 		decal.Face = Enum.NormalId.Front
 		decal.Parent = proxy
 
-		-- Dust particles that inherit the colour of the hit surface
+		-- Dust particles that take the colour of the hit surface
 		local dust = VFX.Dust:Clone()
 		dust.Parent = proxy
 		dust.Color = ColorSequence.new(hitPart.Color)
@@ -293,6 +294,7 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 			blood.Parent = hitPart
 
 			if blood:IsA("ParticleEmitter") then
+				-- Getting the emitcount or setting it to 5 as a base value 
 				blood:Emit(blood:GetAttribute("EmitCount") or 5)
 				Debris:AddItem(blood, blood.Lifetime.Max)
 			end
@@ -363,7 +365,4 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 		
 		Display.Visible = false
 	end)
-
-
-    
-	end
+	
