@@ -249,7 +249,7 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 		-- Rotating the proxy to face away from the surface
 		proxy.CFrame = CFrame.lookAt(position, position + normal)
 
-		-- Slight offset to prevent Z-fighting
+		-- Slight offset to prevent Z messing up
 		proxy.CFrame += normal * 0.01
 
 		proxy.Parent = workspace.Debris
