@@ -2,7 +2,37 @@
 -- notletriq on discord
 -- Gun system including functions and gundata
 -- Raycasting a bullet 
--- I excluded the lines for services and the general variables to show the main core functions with the 200 lines
+
+-- Services and shared references used throughout the gun system
+local PlaySoundEvent = ReplicatedStorage.Remotes.Sounds.PlaySound 
+-- RemoteEvent used to replicate gun sounds to other players
+
+local ReplicateTracer = ReplicatedStorage.Remotes.GunEvents.ReplicateTracer
+-- RemoteEvent used to replicate bullet tracers so all players can see shots
+
+local PlayVFXEvent = ReplicatedStorage.Remotes.GunEvents.PlayVFX
+-- RemoteEvent used to replicate visual effects such as muzzle flash
+
+local bulletHoleTexture = "rbxassetid://3696144972"
+-- Texture ID used for bullet hole decals on surfaces
+
+local Animations = ReplicatedFirst.Animations
+-- Folder containing all animation assets
+
+local GunAnimations = Animations.Guns
+-- Subfolder specifically for gun-related animations
+
+local Assets = ReplicatedStorage.Assets
+-- Main assets folder stored in ReplicatedStorage
+
+local GunAssets = Assets.Guns
+-- Folder containing gun models, sounds, and VFX
+
+local Remotes = ReplicatedStorage.Remotes
+-- Main remotes folder used for client-server communication
+
+local GunEvents = Remotes.GunEvents
+-- Gun-specific remote events and functions
 
 local GunData = {} -- Creating a empty table for GunData which stores all gun configs
 
