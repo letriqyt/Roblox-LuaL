@@ -3,6 +3,21 @@
 -- Gun system including functions and gundata
 -- Raycasting a bullet 
 
+local RunService = game:GetService("RunService")
+-- Used to check whether the script is running on the server or client
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- Stores shared assets and RemoteEvents that are accessed by both server and client
+
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+-- Used to access animations early so they are loaded before gameplay starts
+
+local UserInputService = game:GetService("UserInputService")
+-- Handles player input such as key presses and mouse actions for firing and reloading
+
+local Debris = game:GetService("Debris")
+-- Automatically cleans up temporary objects like bullet holes, particles, and sounds
+
 -- Services and shared references used throughout the gun system
 local PlaySoundEvent = ReplicatedStorage.Remotes.Sounds.PlaySound 
 -- RemoteEvent used to replicate gun sounds to other players
