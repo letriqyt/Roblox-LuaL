@@ -217,7 +217,7 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 				Sounds[soundObj.Name] = soundClone
 			end
 		end
-
+	end
 		local function LoadVFX()
 			-- Finding the gun folder again to load particle effects
 			local GunFolder = GunAssets:FindFirstChild(GunName)
