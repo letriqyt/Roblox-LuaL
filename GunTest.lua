@@ -59,6 +59,26 @@ function GunData.GetGun(GunName) -- Function to get a gun config by name to avoi
 	end
 end
 
+
+function GunData.GiveGun(player)
+	-- Gives the selected gun to the player
+	if not player then return end
+	
+	local Hidden = player:FindFirstChild("Hidden")
+	local EquippedGun = Hidden:FindFirstChild("EquippedGun").Value
+	
+	local GunFolder = GunAssets:FindFirstChild(EquippedGun)
+	local GunClone = GunFolder:FindFirstChild(EquippedGun):Clone()
+	
+	GunClone.Parent = player.Backpack
+	
+	-- Initialising gun on server and client
+	GunData.Server(player, GunClone)
+	task.wait(1)
+	GunData.Client(player, GunClone)
+end
+
+
 GunData.Guns = { -- Table holding every gun and its stats
 	{
 		Name = "Glock17", -- Name used to match the tool name
@@ -603,25 +623,6 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 		end)
 	end
 	
-end
-
-
-function GunData.GiveGun(player)
-	-- Gives the selected gun to the player
-	if not player then return end
-	
-	local Hidden = player:FindFirstChild("Hidden")
-	local EquippedGun = Hidden:FindFirstChild("EquippedGun").Value
-	
-	local GunFolder = GunAssets:FindFirstChild(EquippedGun)
-	local GunClone = GunFolder:FindFirstChild(EquippedGun):Clone()
-	
-	GunClone.Parent = player.Backpack
-	
-	-- Initialising gun on server and client
-	GunData.Server(player, GunClone)
-	task.wait(1)
-	GunData.Client(player, GunClone)
 end
 
 return GunData
