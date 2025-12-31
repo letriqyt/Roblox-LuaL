@@ -605,6 +605,7 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 	
 end
 
+
 function GunData.GiveGun(player)
 	-- Gives the selected gun to the player
 	if not player then return end
