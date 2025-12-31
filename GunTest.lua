@@ -410,4 +410,219 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 		
 		Display.Visible = false
 	end)
+
+		UserInputService.InputBegan:Connect(function(input, gpe)
+		-- Prevents input from firing if the player is typing or using UI
+		if gpe then return end
+
+		-- Handling slide pull when pressing F and the gun is not slid yet
+		if input.KeyCode == Enum.KeyCode.F and GunModel:GetAttribute("Equipped") and not GunModel:GetAttribute("Slide") then
+			Tracks.Slide:Play() -- Playing slide animation
+			PlayGunSound("SlideSound") -- Playing slide sound
+			
+			-- Telling the server the slide has been pulled
+			GunEvents.Server:InvokeServer(GunModel, {Modification = "Slide", Slide = true})
+			UpdateAmmoUI() -- Updating UI after slide
+		end
+		
+		-- Handling unjamming when gun is jammed and slide is already pulled
+		if input.KeyCode == Enum.KeyCode.F
+			and GunModel:GetAttribute("Equipped")
+			and GunModel:GetAttribute("Slide")
+			and GunModel:GetAttribute("Jammed") then
+			
+			Tracks.Slide:Play() -- Reusing slide animation for unjamming
+			PlayGunSound("SlideSound") -- Same sound effect
+			
+			-- Sending request to server to unjam the gun
+			GunEvents.Server:InvokeServer(GunModel, {Modification = "Jammed", Jammed = false})
+	
+			UpdateAmmoUI()
+		end
+		
+		-- Handling reload input
+		if input.KeyCode == Enum.KeyCode.R
+			and GunModel:GetAttribute("Equipped")
+			and GunModel:GetAttribute("Slide")
+			and GunModel:GetAttribute("Mag") < IntialMag
+			and GunModel:GetAttribute("Stored") > 0
+			and not GunModel:GetAttribute("Reloading") then
+
+			GunModel:SetAttribute("Reloading", true) -- Prevents firing while reloading
+			Tracks.Reload:Play() -- Playing reload animation
+			PlayGunSound("ReloadSound") -- Playing reload sound
+
+			-- Sending reload request to server
+			GunEvents.Server:InvokeServer(GunModel, {
+				Modification = "Reload",
+				IntialMag = IntialMag
+			})
+
+			-- Resetting reload state once animation finishes
+			Tracks.Reload.Stopped:Once(function()
+				GunModel:SetAttribute("Reloading", false)
+				UpdateAmmoUI()
+			end)
+		end
+	end)
+	
+
+	local function FireGun()
+		-- Prevents firing if slide has not been pulled
+		if not GunModel:GetAttribute("Slide") then return end
+		
+		-- Prevents firing while reloading
+		if GunModel:GetAttribute("Reloading") then return end
+		
+		-- Handles empty magazine
+		if GunModel:GetAttribute("Mag") <= 0 then
+			PlayGunSound("EmptyMag")
+			return
+		end
+		
+		-- Prevents firing if player is dead
+		if Character:FindFirstChild("Humanoid").Health <= 0 then return end
+		
+		-- Prevents firing if gun is jammed
+		if GunModel:GetAttribute("Jammed") then return end
+
+		-- Fire rate control using time difference
+		local currentTime = os.clock()
+		if currentTime - LastFireTime < FireRate then return end
+		LastFireTime = currentTime
+
+		-- Getting the point where bullets originate from
+		local FirePoint = GunModel.Handle:FindFirstChild("GunFirePoint")
+		if not FirePoint then warn("No fire point for: "..GunName) return end
+
+		local startPosition = FirePoint.WorldPosition -- Bullet start position
+		local mouseHitPosition = Mouse.Hit.Position -- Where the player is aiming
+		local direction = (mouseHitPosition - startPosition).Unit -- Normalised direction
+		local range = GunModel:GetAttribute("Range") -- Bullet range
+
+		-- Setting up raycast filter to ignore the player and debris
+		local filter = RaycastParams.new()
+		filter.FilterDescendantsInstances = {Character, workspace.Debris}
+		filter.FilterType = Enum.RaycastFilterType.Exclude
+
+		-- Performing raycast to detect hits
+		local rayResult = workspace:Raycast(startPosition, direction * range, filter)
+		local endPosition = rayResult and rayResult.Position or (startPosition + direction * range)
+
+		-- Sending fire request to server (damage, ammo, jam logic handled server-side)
+		local success, jammed = GunEvents.Server:InvokeServer(GunModel, {
+			Modification = "Fire",
+			Target = rayResult and rayResult.Instance
+		})
+
+		GunModel:SetAttribute("Jammed", jammed)
+		UpdateAmmoUI()
+
+		-- Handling jammed gun
+		if jammed then
+			PlayGunSound("EmptyMag")
+			return
+		end
+
+		-- Replicating tracer to other clients
+		ReplicateTracer:FireServer(startPosition, endPosition)
+
+		-- Playing hit effects if something was hit
+		if rayResult then
+			PlayEnemyVFX("Hit", rayResult)
+		end
+
+		Tracks.Fire:Play() -- Fire animation
+		PlayGunVFX("Muzzle") -- Muzzle flash
+		PlayGunVFX("Spark") -- Spark effect
+		PlayGunSound("ShootSound") -- Gunshot sound
+		UpdateAmmoUI()
+	end
+
+	
+
+	local function CreateTracer(startPosition, endPosition)
+		-- Creating a visible tracer between start and end points
+		local distance = (endPosition - startPosition).Magnitude
+
+		local tracer = Instance.new("Part")
+		tracer.CanQuery = false
+		tracer.Anchored = true
+		tracer.CanCollide = false
+		tracer.Material = Enum.Material.Neon
+		tracer.Color = Color3.fromRGB(255, 255, 0)
+		tracer.Size = Vector3.new(0.3, 0.3, distance)
+		tracer.CFrame = CFrame.lookAt(startPosition, endPosition) * CFrame.new(0, 0, -distance / 2)
+		tracer.Parent = workspace.Debris
+
+		-- Removing tracer shortly after creation
+		Debris:AddItem(tracer, 0.15)
+	end
+	
+
+	ReplicateTracer.OnClientEvent:Connect(CreateTracer)
+	-- Listening for tracer replication from the server
+
+
+	PlayVFXEvent.OnClientEvent:Connect(function(position, vfxName)
+		-- Receiving replicated VFX from the server
+		local template = VFX[vfxName]
+		if not template then return end
+
+		local attachment = Instance.new("Attachment")
+		attachment.WorldPosition = position
+		attachment.Parent = workspace.Terrain
+
+		local emitter = template:Clone()
+		emitter.Parent = attachment
+		emitter:Emit(emitter:GetAttribute("EmitCount") or 1)
+
+		Debris:AddItem(attachment, 2)
+	end)
+
+	
+	if FullAuto then
+		-- Handling full auto firing
+		local firing = false
+
+		GunModel.Activated:Connect(function()
+			firing = true
+			while firing do
+				FireGun()
+				task.wait(FireRate)
+			end
+		end)
+
+		GunModel.Deactivated:Connect(function()
+			firing = false
+		end)
+	else
+		-- Semi-auto firing
+		GunModel.Activated:Connect(function()
+			FireGun()
+		end)
+	end
+	
+end
+
+function GunData.GiveGun(player)
+	-- Gives the selected gun to the player
+	if not player then return end
+	
+	local Hidden = player:FindFirstChild("Hidden")
+	local EquippedGun = Hidden:FindFirstChild("EquippedGun").Value
+	
+	local GunFolder = GunAssets:FindFirstChild(EquippedGun)
+	local GunClone = GunFolder:FindFirstChild(EquippedGun):Clone()
+	
+	GunClone.Parent = player.Backpack
+	
+	-- Initialising gun on server and client
+	GunData.Server(player, GunClone)
+	task.wait(1)
+	GunData.Client(player, GunClone)
+end
+
+return GunData
+
 	
