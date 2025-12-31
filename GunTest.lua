@@ -511,7 +511,7 @@ function GunData.Client(player: Player, GunModel: Tool) -- Client-sided logic fo
 		local rayResult = workspace:Raycast(startPosition, direction * range, filter)
 		local endPosition = rayResult and rayResult.Position or (startPosition + direction * range)
 
-		-- Sending fire request to server (damage, ammo, jam logic handled server-side)
+		-- Sending fire request to server (damage, ammo, jam logic handled server side)
 		local success, jammed = GunEvents.Server:InvokeServer(GunModel, {
 			Modification = "Fire",
 			Target = rayResult and rayResult.Instance
