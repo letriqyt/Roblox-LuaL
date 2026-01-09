@@ -254,5 +254,134 @@ function CombatModule.M1(character, enemy, stage)
 	end
 end
 
+
+function CombatModule.Downslam(character, enemy, stage)
+	-- Stop execution if the character does not exist
+	if not character then return end
+
+	-- Current timestamp used for combo timing
+	local now = os.clock()
+
+	-- Ensure this character has an active attack table
+	local active = ensureTable(activeAttacks, character)
+
+	-- Get the fighting style data for this character
+	local Style = FightingStyles.Styles[character:GetAttribute("FightingStyle")]
+	if not Style then return end
+
+	-- When the downslam attack starts
+	if stage == "Start" then
+		-- Prevent attack if combat rules disallow it
+		if not CombatChecks.CanM1(character) then return end
+
+		-- Store the time this attack started
+		lastTimedAttack[character] = now
+
+		-- Start a combo reset timer if one does not already exist
+		if not resetTimers[character] then
+			resetTimers[character] = RunService.Heartbeat:Connect(function()
+				-- Reset combo if player waits too long
+				if os.clock() - lastTimedAttack[character] > 2 then
+					character:SetAttribute("Combo", 1)
+					resetTimers[character]:Disconnect()
+					resetTimers[character] = nil
+				end
+			end)
+		end
+
+		-- Get current combo count or default to 1
+		local Combo = character:GetAttribute("Combo") or 1
+
+		-- Fetch downslam data from the style table
+		local M1_Data = Style.M1_Data["Downslam"]
+		if not M1_Data then return end
+
+		-- Apply attack cooldown
+		AddAttribute(character, "M1_CD", M1_Data.M1_CD)
+
+		-- Prevent jumping during downslam
+		AddAttribute(character, "NoJump", 0.6)
+
+		-- Mark M1 as active for hit validation
+		active.M1 = now
+
+		-- Apply guardbreak window
+		AddAttribute(character, "Guardbroken", 0.8)
+
+		-- Reset combo after downslam
+		character:SetAttribute("Combo", 1)
+
+	-- When the downslam hitbox connects
+	elseif stage == "Hit" and enemy and enemy:FindFirstChild("Humanoid") then
+		-- Cancel if attacker is stunned
+		if character:GetAttribute("Hitstun") > 0 then return end
+
+		-- Get enemy humanoid and root part
+		local EnemyHumanoid = enemy:FindFirstChild("Humanoid")
+		local EnemyHRP = enemy:FindFirstChild("HumanoidRootPart")
+
+		-- Get attacker root part
+		local CharHRP = character:FindFirstChild("HumanoidRootPart")
+
+		-- Calculate direction from enemy to attacker
+		local Direction = (CharHRP.Position - EnemyHRP.Position).Unit
+
+		-- Get enemy facing direction
+		local EnemyLookVector = EnemyHRP.CFrame.LookVector
+
+		-- Dot product checks if enemy is blocking correctly
+		local DotProduct = EnemyLookVector:Dot(Direction)
+
+		-- If enemy is blocking and facing the attack, cancel damage
+		if DotProduct > 0.3 and enemy:GetAttribute("Blocking") then
+			print("hitting blocked player")
+			return
+		end
+
+		-- Validate attack timing
+		if not active.M1 or now - active.M1 > 0.6 then return end
+		active.M1 = nil
+
+		-- Validate hit distance and facing
+		if not CombatModule.CheckHit(character, enemy, 10) then return end
+
+		-- Get downslam data
+		local M1_Data = Style.M1_Data["Downslam"]
+
+		-- Apply damage to enemy
+		EnemyHumanoid:TakeDamage(M1_Data.Damage or 5)
+
+		-- Apply hitstun
+		enemy:SetAttribute("Hitstun", M1_Data.Hitstun)
+
+		-- Knockback duration
+		local KnockbackDuration = 0.25
+
+		-- Get combat effects
+		local CombatVFX = GetEffects(character)
+
+		-- Clear guardbreak on attacker
+		character:SetAttribute("Guardbroken", 0)
+
+		-- Spawn final hit visual effect
+		local VFX = CombatVFX["FinalM1"]:Clone()
+		VFX.Parent = EnemyHRP
+		Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
+
+		-- Apply sprint cooldown after downslam
+		AddAttribute(character, "Sprint_CD", 0.15)
+
+		-- Slam enemy downward with strong vertical force
+		Knockback.Standard(
+			EnemyHRP,
+			(Direction * 5) + Vector3.new(0, -30, 0),
+			KnockbackDuration,
+			1.25,
+			Vector3.new(0, 400000, 0)
+		)
+	end
+end
+
+
 -- return module
 return CombatModule
