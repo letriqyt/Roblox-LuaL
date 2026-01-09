@@ -234,4 +234,107 @@ function CombatModule.M1(character, enemy, stage)
 	end
 end
 
+
+
+function CombatModule.Downslam(character, enemy, stage)
+	if not character then return end
+
+	local now = os.clock()
+	local active = ensureTable(activeAttacks, character)
+	local Style = FightingStyles.Styles[character:GetAttribute("FightingStyle")]
+	if not Style then return end
+	
+	if stage == "Start" then
+		if not CombatChecks.CanM1(character) then return end
+
+		lastTimedAttack[character] = now
+
+		if not resetTimers[character] then
+			resetTimers[character] = RunService.Heartbeat:Connect(function()
+				if os.clock() - lastTimedAttack[character] > 2 then
+					character:SetAttribute("Combo", 1)
+					resetTimers[character]:Disconnect()
+					resetTimers[character] = nil
+				end
+			end)
+		end
+
+
+		local Combo = character:GetAttribute("Combo")
+		if not Combo then Combo = 1 end
+
+		local M1_Data = Style.M1_Data[Combo]
+		if not M1_Data then
+			Combo = 1
+			M1_Data = Style.M1_Data[Combo]
+		end
+
+
+		AddAttribute(character, "M1_CD", M1_Data.M1_CD)
+		
+		AddAttribute(character, "NoJump", 0.6)
+
+		active.M1 = now
+		
+		AddAttribute(character, "Guardbroken", 0.8)
+		Combo = 1
+		
+		character:SetAttribute("Combo", Combo)
+		
+		
+	elseif stage == "Hit" and enemy and enemy:FindFirstChild("Humanoid")  then
+
+		if character:GetAttribute("Hitstun") > 0 then return end
+		
+
+		local EnemyHRP = enemy:FindFirstChild("HumanoidRootPart")
+		local EnemyHumanoid = enemy:FindFirstChild("Humanoid")
+
+		local CharHRP = character:FindFirstChild("HumanoidRootPart")
+		local CharLookVector = CharHRP.CFrame.LookVector
+		local EnemyLookVector = EnemyHRP.CFrame.LookVector
+
+
+		local Direction = (CharHRP.Position - EnemyHRP.Position).Unit
+		local DotProduct = EnemyLookVector:Dot(Direction)
+
+
+		if DotProduct > 0.3 and enemy:GetAttribute("Blocking")  then
+			print("hitting blocked player")
+			return
+		else
+			--CombatModule.Unblock(enemy)
+		end
+
+		if not active.M1 or now - active.M1 > 0.6 then return end
+		active.M1 = nil
+
+
+		if not CombatModule.CheckHit(character, enemy, 10) then return end
+
+		local Combo = character:GetAttribute("Combo")
+		local M1_Data = Style.M1_Data["Downslam"]
+		
+
+		EnemyHumanoid:TakeDamage(M1_Data.Damage or 5)
+		enemy:SetAttribute("Hitstun", M1_Data.Hitstun)
+
+		local KnockbackDuration = 0.25
+		local FightingStyle = character:GetAttribute("FightingStyle")
+		local CombatVFX, CombatSFX = GetEffects(character)
+
+		character:SetAttribute("Guardbroken", 0)
+		local VFX = CombatVFX["FinalM1"]:Clone()
+		VFX.Parent = EnemyHRP
+		Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
+		Remotes.Visuals.SFXEvent:FireAllClients("Punch", EnemyHRP, Combo, FightingStyle)
+		
+		
+		AddAttribute(character, "Sprint_CD", 0.15)
+
+		Knockback.Standard(EnemyHRP, (Direction * 5) + Vector3.new(0,-30, 0), KnockbackDuration, 1.25, Vector3.new(0, 400000, 0)) 
+	end
+	
+end
+
 return CombatModule
