@@ -233,3 +233,5 @@ function CombatModule.M1(character, enemy, stage)
 
 	end
 end
+
+return CombatModule
