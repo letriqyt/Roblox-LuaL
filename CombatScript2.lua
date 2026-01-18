@@ -1,3 +1,4 @@
+-- Made by Letriq
 -- Main combat module table
 -- Acts as a centralized server-authoritative combat handler responsible for
 -- validating attacks, managing combo state, applying damage, and triggering
