@@ -304,6 +304,77 @@ local function getSpreadModifier(gunData, humanoid, isAiming, isCrouching)
 	return gunData.SpreadIdle
 end
 
+
+-- Server-side entry point for gun-related replication
+function GunFramework.Server(player: Player)
+
+	-- Listen for a client telling the server to replicate a gun sound
+	PlaySoundEvent.OnServerEvent:Connect(function(player, position, soundName)
+
+		-- Basic sanity check to prevent bad / malicious data
+		if typeof(position) ~= "Vector3" or typeof(soundName) ~= "string" then
+			return
+		end
+
+		-- Loop through every player currently in the game
+		for _, otherPlayer in ipairs(game.Players:GetPlayers()) do
+
+			-- Do NOT send the sound back to the player who fired it
+			if otherPlayer ~= player then
+
+				-- Tell all other clients to play the sound at the given world position
+				PlaySoundEvent:FireClient(otherPlayer, position, soundName)
+			end
+		end
+	end)
+	
+	
+	-- Listen for tracer replication requests from a firing client
+	ReplicateTracer.OnServerEvent:Connect(function(player, origin, direction, speed, range)
+
+		-- Loop through all players
+		for _, other in ipairs(game.Players:GetPlayers()) do
+
+			-- Skip the shooter (they already spawned their tracer locally)
+			if other ~= player then
+				print("Firing") -- Debug output to confirm replication
+
+				-- Tell other clients to fire a cosmetic tracer
+				ReplicateTracer:FireClient(
+					other,
+					origin,     -- Bullet start position
+					direction,  -- Bullet direction vector
+					speed,      -- Bullet travel speed
+					range       -- Max distance
+				)
+			end
+		end
+	end)
+
+
+	-- Listen for VFX replication requests (muzzle flash, impacts, etc.)
+	PlayVFXEvent.OnServerEvent:Connect(function(player, position, vfxName)
+
+		-- Validate incoming data
+		if typeof(position) ~= "Vector3" or typeof(vfxName) ~= "string" then
+			return
+		end
+
+		-- Send the VFX event to all other players
+		for _, otherPlayer in ipairs(game.Players:GetPlayers()) do
+
+			-- Skip the originating player
+			if otherPlayer ~= player then
+
+				-- Tell the client to play the specified VFX at the given position
+				PlayVFXEvent:FireClient(otherPlayer, position, vfxName)
+			end
+		end
+	end)
+
+end
+
+
 -- Client-side entry point for the gun system
 function GunFramework.Client(player: Player, gunType, inventory)
 
