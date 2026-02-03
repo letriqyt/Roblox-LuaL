@@ -1,7 +1,7 @@
 -- Main combat module table
 local CombatModule = {}
 
--- Services used for timing, storage, sounds, physics, and player access
+--// Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
@@ -10,126 +10,115 @@ local SoundService = game:GetService("SoundService")
 local Debris = game:GetService("Debris")
 local PhysicsService = game:GetService("PhysicsService")
 
--- Required modules for cooldowns, combat validation, styles, and knockback
+--// Modules
 local CooldownModule = require(ReplicatedStorage.Modules.Helpers.CooldownModule)
 local CombatChecks = require(ReplicatedStorage.Modules.Combat.CombatChecks)
 local FightingStyles = require(ReplicatedStorage.Modules.Tables.FightingStyles)
 local Knockback = require(ReplicatedStorage.Modules.Combat.Knockback)
 
--- Remote references for animations, VFX, and SFX
+--// Remotes & Assets
 local Remotes = ReplicatedStorage.Remotes
 local Assets = ReplicatedStorage.Assets
 local AnimationEvent = Remotes.Animation.AnimationEvent
 
--- Folders that contain combat visual and sound effects
+--// VFX / SFX folders
 local VFXFolder = Assets.VFX
 local SFXFolder = SoundService.Combat
 
--- Tracks currently active attacks per character
-local activeAttacks = {}
+--// Runtime state
+local DashAxis
+local activeAttacks = {}      -- Tracks active attacks per character
+local lastTimedAttack = {}   -- Used for combo reset timing
+local resetTimers = {}       -- Heartbeat connections for combo resets
 
--- Stores last attack time per character to reset combos
-local lastTimedAttack = {}
-
--- Stores heartbeat connections used for combo resets
-local resetTimers = {}
-
--- Example cooldown value (not used directly here)
 local M2_Cooldown = 1
 
--- Adds a value onto an existing attribute instead of overwriting it
+--// Utility: safely add to a numeric attribute
 local function AddAttribute(Character, Attribute, Value)
-	-- Gets current attribute value and adds to it
 	Character:SetAttribute(Attribute, Character:GetAttribute(Attribute) + Value)
 end
 
--- Ensures a table exists at a given key and returns it
+--// Utility: ensure a table exists at a key
 local function ensureTable(tbl, key)
-	-- Create table if missing
 	if not tbl[key] then
 		tbl[key] = {}
 	end
-	-- Return ensured table
 	return tbl[key]
 end
 
--- Gets VFX and SFX folders based on the character’s fighting style
+--// Get player from character model
+local function getPlayerFromCharacter(character)
+	return Players:GetPlayerFromCharacter(character)
+end
+
+--// Handles single enemy or table of enemies uniformly
+local function ForEachEnemy(enemyInput, callback)
+	if not enemyInput then return end
+
+	-- Single enemy
+	if typeof(enemyInput) == "Instance" then
+		callback(enemyInput)
+		return
+	end
+
+	-- Multiple enemies
+	if typeof(enemyInput) == "table" then
+		for _, enemy in ipairs(enemyInput) do
+			if typeof(enemy) == "Instance" then
+				callback(enemy)
+			end
+		end
+	end
+end
+
+--// Get combat VFX/SFX based on fighting style
 local function GetEffects(Character)
-	-- Read the FightingStyle attribute
 	local FightingStyle = Character:GetAttribute("FightingStyle")
-	-- Find matching VFX folder
 	local CombatVFX = VFXFolder:FindFirstChild(FightingStyle)
-	-- Find matching SFX folder
 	local CombatSFX = SFXFolder:FindFirstChild(FightingStyle)
-	-- Return both folders
+
 	return CombatVFX, CombatSFX
 end
 
--- Checks if a hit is valid based on distance and facing direction
-function CombatModule.CheckHit(character, enemy, sanityDistance)
-	-- Cancel if either character is missing
-	if not character then return end
-	if not enemy then return end
+--// Fire animation event (client-specific or global)
+local function FireAnimation(character, action, data)
+	data = data or {}
+	data.Character = character
 
-	-- Get humanoid root parts for position and facing checks
-	local CharHRP = character:WaitForChild("HumanoidRootPart")
-	local EnemyHRP = enemy:WaitForChild("HumanoidRootPart")
+	local player = Players:GetPlayerFromCharacter(character)
 
-	-- Calculate distance between the two characters
-	local Distance = (EnemyHRP.Position - CharHRP.Position).Magnitude
-
-	-- Fail hit if too far away
-	if Distance > sanityDistance then
-		print("too far away")
-		return
+	if player then
+		AnimationEvent:FireClient(player, action, data)
+	else
+		AnimationEvent:FireAllClients(action, data)
 	end
-
-	-- Get the forward direction of the attacker
-	local CharLookVector = CharHRP.CFrame.LookVector
-
-	-- Get direction vector pointing from attacker to enemy
-	local Direction = (EnemyHRP.Position - CharHRP.Position).Unit
-
-	-- Dot product determines if attacker is facing enemy
-	local DotProduct = CharLookVector:Dot(Direction)
-
-	-- Fail hit if attacker is not facing enemy enough
-	if DotProduct < 0.3 then
-		print("not facing enemy")
-		return
-	end
-
-	-- Hit is valid
-	return true
 end
 
--- Handles basic M1 combo attacks
+----------------------------------------------------------------
+-- M1 COMBO ATTACK
+----------------------------------------------------------------
 function CombatModule.M1(character, enemy, stage)
-	-- Stop if character is missing
 	if not character then return end
 
-	-- Current timestamp for combo timing
 	local now = os.clock()
-
-	-- Ensure attack state table exists for this character
 	local active = ensureTable(activeAttacks, character)
 
 	-- Get fighting style data
 	local Style = FightingStyles.Styles[character:GetAttribute("FightingStyle")]
 	if not Style then return end
 
-	-- When M1 is pressed
+	----------------------------------------------------------------
+	-- START PHASE
+	----------------------------------------------------------------
 	if stage == "Start" then
-		-- Check if character is allowed to M1
 		if not CombatChecks.CanM1(character) then return end
 
-		-- Save the time of this attack
+		-- Track last attack time for combo reset
 		lastTimedAttack[character] = now
 
-		-- Start combo reset timer if one isn’t running
+		-- Heartbeat-based combo reset after inactivity
 		if not resetTimers[character] then
 			resetTimers[character] = RunService.Heartbeat:Connect(function()
-				-- Reset combo if player waited too long
 				if os.clock() - lastTimedAttack[character] > 2 then
 					character:SetAttribute("Combo", 1)
 					resetTimers[character]:Disconnect()
@@ -138,250 +127,172 @@ function CombatModule.M1(character, enemy, stage)
 			end)
 		end
 
-		-- Get current combo or default to 1
+		-- Resolve combo index
 		local Combo = character:GetAttribute("Combo") or 1
+		local M1_Data = Style.M1_Data[Combo]
 
-		-- Get M1 data for current combo
-		local M1_Data = Style.M1_Data[Combo] or Style.M1_Data[1]
+		-- Fallback if combo index invalid
+		if not M1_Data then
+			Combo = 1
+			M1_Data = Style.M1_Data[Combo]
+		end
 
-		-- Apply attack cooldown
+		local FightingStyle = character:GetAttribute("FightingStyle")
+
+		-- Play swing SFX
+		Remotes.Visuals.SFXEvent:FireAllClients(
+			"Swing",
+			character:FindFirstChild("HumanoidRootPart"),
+			Combo,
+			FightingStyle
+		)
+
+		-- Apply cooldowns and restrictions
 		AddAttribute(character, "M1_CD", M1_Data.M1_CD)
-
-		-- Apply jump lock if needed
 		character:SetAttribute("NoJump", M1_Data.NoJump)
 
-		-- Mark M1 as active
 		active.M1 = now
 
-		-- Increment combo
+		-- Advance combo and handle finisher
 		Combo += 1
-
-		-- Reset combo and apply guardbreak if max reached
 		if Combo > 4 then
 			AddAttribute(character, "Guardbroken", 0.8)
 			Combo = 1
 		end
 
-		-- Save combo value
 		character:SetAttribute("Combo", Combo)
 
-	-- When hitbox connects
-	elseif stage == "Hit" and enemy and enemy:FindFirstChild("Humanoid") then
-		-- Stop if attacker is stunned
+	----------------------------------------------------------------
+	-- HIT PHASE
+	----------------------------------------------------------------
+	elseif stage == "Hit" then
 		if character:GetAttribute("Hitstun") > 0 then return end
-
-		-- Stop if enemy cannot be damaged
-		if CombatChecks.CanDamage(enemy) then return end
-
-		-- Disable sprint on enemy when hit
-		enemy:SetAttribute("SprintDisabled", true)
-
-		-- Make sure attack timing is valid
 		if not active.M1 or now - active.M1 > 0.6 then return end
+
 		active.M1 = nil
 
-		-- Validate distance and facing
-		if not CombatModule.CheckHit(character, enemy, 10) then return end
+		local ComboAtHit = character:GetAttribute("Combo")
+		local IsFinalM1 = (ComboAtHit == 1)
 
-		-- Determine which combo stage actually hit
-		local Combo = character:GetAttribute("Combo")
-		local M1_Data = Style.M1_Data[Combo - 1] or Style.M1_Data[4]
-
-		-- Get humanoids and root parts
-		local EnemyHumanoid = enemy:FindFirstChild("Humanoid")
-		local EnemyHRP = enemy:FindFirstChild("HumanoidRootPart")
 		local CharHRP = character:FindFirstChild("HumanoidRootPart")
+		if not CharHRP then return end
 
-		-- Apply damage
-		EnemyHumanoid:TakeDamage(M1_Data.Damage or 5)
+		-- Resolve correct hit data
+		local M1_Data = IsFinalM1
+			and Style.M1_Data[4]
+			or Style.M1_Data[ComboAtHit - 1]
 
-		-- Apply hitstun
-		enemy:SetAttribute("Hitstun", M1_Data.Hitstun)
+		if not M1_Data then return end
 
-		-- Direction from attacker to enemy
-		local Direction = (EnemyHRP.Position - CharHRP.Position).Unit
+		local FightingStyle = character:GetAttribute("FightingStyle")
+		local CombatVFX, CombatSFX = GetEffects(character)
 
-		-- Knockback duration
-		local KnockbackDuration = 0.25
-
-		-- Get effects
-		local CombatVFX = GetEffects(character)
-
-		-- Final hit logic
-		if Combo == 1 then
+		-- Final hit bonus effects
+		if IsFinalM1 then
 			character:SetAttribute("Guardbroken", 0)
-
-			-- Spawn final hit VFX
-			local VFX = CombatVFX["FinalM1"]:Clone()
-			VFX.Parent = EnemyHRP
-			Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
-
-			-- Strong knockback
-			Knockback.Standard(
-				EnemyHRP,
-				(Direction * 30) + Vector3.new(0, 20, 0),
-				KnockbackDuration,
-				1,
-				Vector3.new(40000, 40000, 40000)
-			)
-
-			-- Small sprint lock
 			AddAttribute(character, "Sprint_CD", 0.15)
-		else
-			-- Normal hit VFX
-			local VFX = CombatVFX["M1"]:Clone()
-			VFX.Parent = EnemyHRP
-			Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
+		end
 
-			-- Light knockback
+		-- Apply hit to all enemies
+		ForEachEnemy(enemy, function(enemy)
+			if not enemy:FindFirstChild("Humanoid") then return end
+			if CombatChecks.CanDamage(enemy) then return end
+
+			local EnemyHRP = enemy:FindFirstChild("HumanoidRootPart")
+			local EnemyHumanoid = enemy:FindFirstChild("Humanoid")
+			if not EnemyHRP or not EnemyHumanoid then return end
+
+			-- Direction and block check
+			local Direction = (EnemyHRP.Position - CharHRP.Position).Unit
+			local DotProduct = EnemyHRP.CFrame.LookVector:Dot(Direction)
+			local isBlocking = enemy:GetAttribute("Blocking")
+
+			if isBlocking and DotProduct < 0.3 then
+				Remotes.Visuals.SFXEvent:FireAllClients(
+					"BlockHit",
+					EnemyHRP,
+					ComboAtHit,
+					FightingStyle
+				)
+				return
+			end
+
+			-- Break block if hit from behind
+			if isBlocking then
+				CombatModule.Unblock(enemy)
+			end
+
+			-- Damage + hitstun
+			EnemyHumanoid:TakeDamage(M1_Data.Damage or 5)
+			enemy:SetAttribute("Hitstun", M1_Data.Hitstun)
+
+			-- VFX / knockback
+			if IsFinalM1 then
+				local VFX = CombatVFX.FinalM1:Clone()
+				VFX.Parent = EnemyHRP
+
+				Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
+				Remotes.Visuals.SFXEvent:FireAllClients("Punch", EnemyHRP, 1, FightingStyle)
+
+				Knockback.Standard(
+					EnemyHRP,
+					(Direction * 30) + Vector3.new(0, 20, 0),
+					0.25,
+					1,
+					Vector3.new(40000, 40000, 40000)
+				)
+			else
+				local VFX = CombatVFX.M1:Clone()
+				VFX.Parent = EnemyHRP
+
+				Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
+				Remotes.Visuals.SFXEvent:FireAllClients("Punch", EnemyHRP, ComboAtHit, FightingStyle)
+
+				Knockback.Standard(
+					EnemyHRP,
+					Direction * 10,
+					0.25,
+					nil,
+					Vector3.new(2000, 0, 20000)
+				)
+			end
+
+			-- Small self-lunge
 			Knockback.Standard(
-				EnemyHRP,
-				Direction * 10,
-				KnockbackDuration,
+				CharHRP,
+				CharHRP.CFrame.LookVector * 10,
+				0.25,
 				nil,
 				Vector3.new(2000, 0, 20000)
 			)
-		end
-
-		-- Small recoil on attacker
-		Knockback.Standard(
-			CharHRP,
-			Direction * 10,
-			KnockbackDuration,
-			nil,
-			Vector3.new(2000, 0, 20000)
-		)
+		end)
 	end
 end
 
-
-function CombatModule.Downslam(character, enemy, stage)
-	-- Stop execution if the character does not exist
+----------------------------------------------------------------
+-- BLOCK / UNBLOCK
+----------------------------------------------------------------
+function CombatModule.Block(character, stage)
 	if not character then return end
 
-	-- Current timestamp used for combo timing
-	local now = os.clock()
+	character:SetAttribute("Blocking", stage)
 
-	-- Ensure this character has an active attack table
-	local active = ensureTable(activeAttacks, character)
-
-	-- Get the fighting style data for this character
-	local Style = FightingStyles.Styles[character:GetAttribute("FightingStyle")]
-	if not Style then return end
-
-	-- When the downslam attack starts
-	if stage == "Start" then
-		-- Prevent attack if combat rules disallow it
-		if not CombatChecks.CanM1(character) then return end
-
-		-- Store the time this attack started
-		lastTimedAttack[character] = now
-
-		-- Start a combo reset timer if one does not already exist
-		if not resetTimers[character] then
-			resetTimers[character] = RunService.Heartbeat:Connect(function()
-				-- Reset combo if player waits too long
-				if os.clock() - lastTimedAttack[character] > 2 then
-					character:SetAttribute("Combo", 1)
-					resetTimers[character]:Disconnect()
-					resetTimers[character] = nil
-				end
-			end)
-		end
-
-		-- Get current combo count or default to 1
-		local Combo = character:GetAttribute("Combo") or 1
-
-		-- Fetch downslam data from the style table
-		local M1_Data = Style.M1_Data["Downslam"]
-		if not M1_Data then return end
-
-		-- Apply attack cooldown
-		AddAttribute(character, "M1_CD", M1_Data.M1_CD)
-
-		-- Prevent jumping during downslam
-		AddAttribute(character, "NoJump", 0.6)
-
-		-- Mark M1 as active for hit validation
-		active.M1 = now
-
-		-- Apply guardbreak window
-		AddAttribute(character, "Guardbroken", 0.8)
-
-		-- Reset combo after downslam
-		character:SetAttribute("Combo", 1)
-
-	-- When the downslam hitbox connects
-	elseif stage == "Hit" and enemy and enemy:FindFirstChild("Humanoid") then
-		-- Cancel if attacker is stunned
-		if character:GetAttribute("Hitstun") > 0 then return end
-
-		-- Get enemy humanoid and root part
-		local EnemyHumanoid = enemy:FindFirstChild("Humanoid")
-		local EnemyHRP = enemy:FindFirstChild("HumanoidRootPart")
-
-		-- Get attacker root part
-		local CharHRP = character:FindFirstChild("HumanoidRootPart")
-
-		-- Calculate direction from enemy to attacker
-		local Direction = (CharHRP.Position - EnemyHRP.Position).Unit
-
-		-- Get enemy facing direction
-		local EnemyLookVector = EnemyHRP.CFrame.LookVector
-
-		-- Dot product checks if enemy is blocking correctly
-		local DotProduct = EnemyLookVector:Dot(Direction)
-
-		-- If enemy is blocking and facing the attack, cancel damage
-		if DotProduct > 0.3 and enemy:GetAttribute("Blocking") then
-			print("hitting blocked player")
-			return
-		end
-
-		-- Validate attack timing
-		if not active.M1 or now - active.M1 > 0.6 then return end
-		active.M1 = nil
-
-		-- Validate hit distance and facing
-		if not CombatModule.CheckHit(character, enemy, 10) then return end
-
-		-- Get downslam data
-		local M1_Data = Style.M1_Data["Downslam"]
-
-		-- Apply damage to enemy
-		EnemyHumanoid:TakeDamage(M1_Data.Damage or 5)
-
-		-- Apply hitstun
-		enemy:SetAttribute("Hitstun", M1_Data.Hitstun)
-
-		-- Knockback duration
-		local KnockbackDuration = 0.25
-
-		-- Get combat effects
-		local CombatVFX = GetEffects(character)
-
-		-- Clear guardbreak on attacker
-		character:SetAttribute("Guardbroken", 0)
-
-		-- Spawn final hit visual effect
-		local VFX = CombatVFX["FinalM1"]:Clone()
-		VFX.Parent = EnemyHRP
-		Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
-
-		-- Apply sprint cooldown after downslam
-		AddAttribute(character, "Sprint_CD", 0.15)
-
-		-- Slam enemy downward with strong vertical force
-		Knockback.Standard(
-			EnemyHRP,
-			(Direction * 5) + Vector3.new(0, -30, 0),
-			KnockbackDuration,
-			1.25,
-			Vector3.new(0, 400000, 0)
-		)
-	end
+	FireAnimation(character, "Block", {
+		State = stage
+	})
 end
 
+function CombatModule.Unblock(character)
+	if not character then return end
+	if not character:GetAttribute("Blocking") then return end
 
--- return module
+	character:SetAttribute("Blocking", false)
+
+	FireAnimation(character, "Block", {
+		State = false
+	})
+end
+
+--// Return module
 return CombatModule
+
