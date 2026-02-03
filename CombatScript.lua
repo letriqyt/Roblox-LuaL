@@ -299,4 +299,278 @@ function ClientModule.M1()
 	track.Stopped:Connect(function() Attacking = false end)
 end
 
+function ClientModule.Dash(Direction, isIdleDash)
+	--// Direction classification
+	local isFrontBack = FrontBackDirections[Direction] == true
+	local isLeftRight = FrontBackDirections[Direction] == true
+	local Camera = workspace.CurrentCamera
+
+	--// Global dash checks
+	if not CombatChecks.CanDash(character) then return end
+	if Attacking and isFrontBack then return end
+	if Dashing then return end
+
+	--// Cooldown routing based on dash axis
+	local isForward = (Direction == "Front" or Direction == "Back")
+	local OnCD 
+
+	if isForward then
+		OnCD = Remotes.Other.CheckCooldown:InvokeServer(character.Name, "Forward")
+		if OnCD then return end
+	else
+		OnCD = Remotes.Other.CheckCooldown:InvokeServer(character.Name, "Side")
+		if OnCD then return end
+	end
+
+	--// Character validation
+	local Humanoid = character:FindFirstChild("Humanoid")
+	if not Humanoid then return end
+
+	--// Fetch dash animations
+	local DashAnim = ReplicatedFirst.Animations.Combat.Dashes:FindFirstChild(Direction)
+	local FrontHit = ReplicatedFirst.Animations.Combat.Dashes.FrontHit
+	if not DashAnim or not FrontHit then return end
+
+	--// Enter dash state
+	Dashing = true
+	secondFlipUsed = false
+
+	--// Rotation locking for forward dash
+	local originalAutoRotate = Humanoid.AutoRotate
+	local lockedYaw
+
+	if Direction == "Front" then
+		Humanoid.AutoRotate = false
+		local _, yaw, _ = HumanoidRootPart.CFrame:ToEulerAnglesYXZ()
+		lockedYaw = yaw
+	end
+
+	--// Play dash animation
+	local animTrack = Animator:LoadAnimation(DashAnim)
+	animTrack.Priority = Enum.AnimationPriority.Action
+	animTrack:Play(0.05, nil, 1.1)
+
+	--// Notify server of dash start
+	InputEvent:InvokeServer("Dash", {
+		Stage = "Start",
+		Direction = Direction
+	})
+
+	--// Dash cancel conditions
+	local startHealth = Humanoid.Health
+	local cancelling = false
+
+	--// Full dash cleanup
+	local function cancelDash()
+		if cancelling then return end
+		cancelling = true
+		if not Dashing then return end
+
+		Dashing = false
+
+		if dashConn then dashConn:Disconnect() dashConn = nil end
+		if dashBV then dashBV:Destroy() dashBV = nil end
+		if healthConn then healthConn:Disconnect() healthConn = nil end
+		if animTrack and animTrack.IsPlaying then animTrack:Stop(0.1) end
+
+		Humanoid.AutoRotate = originalAutoRotate
+		lockedYaw = nil
+
+		StopDashTrail()
+	end
+
+	--// Cancel dash on damage
+	healthConn = Humanoid.HealthChanged:Connect(function(newHealth)
+		if newHealth < startHealth then
+			cancelDash()
+		end
+	end)
+
+	--// Dash tuning per direction
+	local DashStats = {
+		Front = { Speed = 60, CameraSteer = false },
+		Back  = { Speed = 60, CameraSteer = true },
+		Left  = { Speed = 45, CameraSteer = true },
+		Right = { Speed = 45, CameraSteer = true }
+	}
+
+	local Stats = DashStats[Direction]
+	local dashDir
+
+	--// Initial dash direction resolution
+	local function GetInitialDashDirection()
+		if Stats.CameraSteer then
+			local camForward = Vector3.new(Camera.CFrame.LookVector.X, 0, Camera.CFrame.LookVector.Z).Unit
+			local camRight = Vector3.new(Camera.CFrame.RightVector.X, 0, Camera.CFrame.RightVector.Z).Unit
+
+			if Direction == "Front" then
+				return camForward
+			elseif Direction == "Back" then
+				return -camForward
+			elseif Direction == "Right" then
+				return camRight
+			elseif Direction == "Left" then
+				return -camRight
+			end
+		else
+			local look = HumanoidRootPart.CFrame.LookVector
+			return Vector3.new(look.X, 0, look.Z).Unit
+		end
+	end
+
+	--// Convert yaw to forward vector
+	local function ForwardFromYaw(yaw)
+		return Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
+	end
+
+	--// Initialize dash velocity
+	dashDir = GetInitialDashDirection()
+
+	dashBV = Instance.new("BodyVelocity")
+	dashBV.MaxForce = Vector3.new(50000, 0, 50000)
+	dashBV.Velocity = dashDir * DASH_START_SPEED
+	dashBV.Parent = HumanoidRootPart
+
+	local currentSpeed = DASH_START_SPEED
+
+	--// Dash movement loop
+	dashConn = RunService.RenderStepped:Connect(function(deltaTime)
+		if not Dashing or not dashBV or not dashDir then return end
+
+		--// Forward dash yaw locking
+		if Direction == "Front" and lockedYaw then
+			local pos = HumanoidRootPart.Position
+
+			if IsShiftLocked() then
+				local camLook = Camera.CFrame.LookVector
+				lockedYaw = math.atan2(-camLook.X, -camLook.Z)
+				dashDir = ForwardFromYaw(lockedYaw)
+			end
+
+			HumanoidRootPart.CFrame =
+				CFrame.new(pos) *
+				CFrame.fromOrientation(0, lockedYaw, 0)
+		end
+
+		--// Live camera steering
+		if Stats.CameraSteer then
+			dashDir = GetInitialDashDirection()
+		end
+
+		dashDir = Vector3.new(dashDir.X, 0, dashDir.Z).Unit
+		dashBV.Velocity = dashDir * currentSpeed
+
+		currentSpeed -= DASH_DECAY_RATE * deltaTime
+		if currentSpeed <= 0 then
+			cancelDash()
+			return
+		end
+
+		TrySpawnDashTrail()
+	end)
+
+	--// Dash impact window
+	animTrack:GetMarkerReachedSignal("End"):Connect(function()
+		if not Dashing then return end
+
+		local HitTrack = Animator:LoadAnimation(FrontHit)
+		HitTrack.Priority = Enum.AnimationPriority.Action
+		HitTrack:Play(0.05, nil, 1.1)
+
+		InputEvent:InvokeServer("Dash", {
+			Stage = "HitPoint",
+			Direction = Direction
+		})
+
+		HitboxModule.CreateHitbox(
+			HumanoidRootPart,
+			CFrame.new(0, 0, -2.5),
+			Vector3.new(4, 5, 5),
+			0.15,
+			false,
+			nil,
+			function(enemies)
+				if enemies and #enemies > 0 then
+					InputEvent:InvokeServer("Dash", {
+						Enemy = enemies,
+						Stage = "Hit"
+					})
+				end
+			end
+		)
+	end)
+
+	--// Back dash flip logic
+	animTrack:GetMarkerReachedSignal("Back"):Connect(function()
+		if not Dashing then return end
+		if Direction ~= "Back" or secondFlipUsed then return end
+		secondFlipUsed = true
+
+		if dashBV then dashBV.Velocity = Vector3.zero end
+		StopDashTrail()
+
+		task.delay(BACK_DASH_PAUSE, function()
+			if not Dashing then return end
+
+			dashDir = GetInitialDashDirection()
+			dashDir = Vector3.new(dashDir.X, 0, dashDir.Z).Unit
+			currentSpeed = DASH_START_SPEED * BACK_DASH_BOOST
+
+			if dashBV then
+				dashBV.Velocity = dashDir * currentSpeed
+			end
+
+			TrySpawnDashTrail()
+		end)
+	end)
+
+	--// Final cleanup on animation stop
+	animTrack.Stopped:Connect(cancelDash)
+end
+
+
+function ClientModule.Block()
+	--// Notify server of block start
+	InputEvent:InvokeServer("Block", { Stage = true })
+
+	--// Resolve block animation from fighting style
+	local styleName = character:GetAttribute("FightingStyle")
+	local styleFolder = FightingStyle:FindFirstChild(styleName)
+	if not styleFolder then return end
+
+	local anim = styleFolder:FindFirstChild("Block")
+	if not anim then return end
+
+	--// Replace existing block animation
+	if BlockAnimTrack then
+		BlockAnimTrack:Stop(0.15)
+		BlockAnimTrack = nil
+	end
+
+	BlockAnimTrack = Animator:LoadAnimation(anim)
+	Disconnect(anim)
+
+	BlockAnimTrack.Priority = Enum.AnimationPriority.Action
+	BlockAnimTrack:Play(0.1, nil, 1.1)
+end
+
+
+function ClientModule.Unblock()
+	--// Notify server of block end
+	InputEvent:InvokeServer("Block", { Stage = false })
+
+	--// Stop local block animation
+	if BlockAnimTrack then
+		BlockAnimTrack:Stop(0.15)
+		BlockAnimTrack = nil
+	end
+end
+
+
+--// Character lifecycle binding
+player.CharacterAdded:Connect(bindCharacter)
+
+if player.Character then
+	bindCharacter(player.Character)
+end
 
