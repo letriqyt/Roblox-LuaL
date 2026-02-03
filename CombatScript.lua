@@ -1,298 +1,302 @@
--- Main combat module table
-local CombatModule = {}
+--// Core character references (bound on spawn / respawn)
+local character
+local humanoid
+local Animator
+local HumanoidRootPart
+local BlockAnimTrack
 
---// Services
+--// Roblox services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local Players = game:GetService("Players")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
 local ServerStorage = game:GetService("ServerStorage")
-local SoundService = game:GetService("SoundService")
-local Debris = game:GetService("Debris")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local PhysicsService = game:GetService("PhysicsService")
 
---// Modules
-local CooldownModule = require(ReplicatedStorage.Modules.Helpers.CooldownModule)
+--// Combat-related modules
 local CombatChecks = require(ReplicatedStorage.Modules.Combat.CombatChecks)
-local FightingStyles = require(ReplicatedStorage.Modules.Tables.FightingStyles)
 local Knockback = require(ReplicatedStorage.Modules.Combat.Knockback)
+local HitboxModule = require(ReplicatedStorage.Modules.Combat.Hitbox)
 
---// Remotes & Assets
+--// Networking
 local Remotes = ReplicatedStorage.Remotes
-local Assets = ReplicatedStorage.Assets
+local InputEvent = Remotes.Combat.Input
+local CheckCooldown = Remotes.Other.CheckCooldown
 local AnimationEvent = Remotes.Animation.AnimationEvent
 
---// VFX / SFX folders
-local VFXFolder = Assets.VFX
-local SFXFolder = SoundService.Combat
+--// Helper / movement / visual modules
+local CooldownModule = require(ReplicatedStorage.Modules.Helpers.CooldownModule)
+local SprintModule = require(ReplicatedStorage.Modules.Movement.SprintModule)
+local RockModule = require(ReplicatedStorage.Modules.Visuals.RockModule)
 
---// Runtime state
-local DashAxis
-local activeAttacks = {}      -- Tracks active attacks per character
-local lastTimedAttack = {}   -- Used for combo reset timing
-local resetTimers = {}       -- Heartbeat connections for combo resets
+--// Player references
+local player = Players.LocalPlayer
+local playerGui = player.PlayerGui
+local Mouse = player:GetMouse()
 
-local M2_Cooldown = 1
+--// Initial character binding
+character = player.Character or player.CharacterAdded:Wait()
+HumanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+humanoid = character:FindFirstChild("Humanoid")
+Animator = humanoid:FindFirstChild("Animator")
 
---// Utility: safely add to a numeric attribute
-local function AddAttribute(Character, Attribute, Value)
-	Character:SetAttribute(Attribute, Character:GetAttribute(Attribute) + Value)
-end
+--// Animation folders
+local Animations = ReplicatedFirst.Animations
+local Combat = Animations.Combat
+local FightingStyle = Combat.FightingStyles
+local Dashes = Combat.Dashes
 
---// Utility: ensure a table exists at a key
-local function ensureTable(tbl, key)
-	if not tbl[key] then
-		tbl[key] = {}
+--// Dash tuning constants
+local DASH_START_SPEED = 60
+local DASH_DECAY_RATE = 60
+local BACK_DASH_PAUSE = 0.08
+local BACK_DASH_BOOST = 1.0
+
+--// Dash state
+local secondFlipUsed = false
+local Dashing = false
+local dashBV
+local dashConn
+local healthConn
+
+--// Dash trail state
+local dashTrailConn
+local trailActive = false
+local lastTrailPos = nil
+local TRAIL_SPACING = 2
+
+--// Combat state
+local Attacking = false
+local Punching = false
+
+--// Direction validation tables
+local FrontBackDirections = { Front = true, Back = true }
+local LeftRightDirections = { Left = true, Right = true }
+
+--// Client module
+local ClientModule = {}
+
+--// Runtime connections & animation tracking
+local Connections = {}
+local AnimationHandlers = {}
+local ActiveTracks = {}
+
+--// Utility to safely disconnect named connections
+local function Disconnect(name)
+	if Connections[name] then
+		Connections[name]:Disconnect()
+		Connections[name] = nil
 	end
-	return tbl[key]
 end
 
---// Get player from character model
-local function getPlayerFromCharacter(character)
-	return Players:GetPlayerFromCharacter(character)
+--// Fetch animator from any character instance
+local function getAnimator(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+	return humanoid:FindFirstChildOfClass("Animator")
 end
 
---// Handles single enemy or table of enemies uniformly
-local function ForEachEnemy(enemyInput, callback)
-	if not enemyInput then return end
-
-	-- Single enemy
-	if typeof(enemyInput) == "Instance" then
-		callback(enemyInput)
-		return
-	end
-
-	-- Multiple enemies
-	if typeof(enemyInput) == "table" then
-		for _, enemy in ipairs(enemyInput) do
-			if typeof(enemy) == "Instance" then
-				callback(enemy)
-			end
-		end
-	end
+--// Check shift-lock camera state
+local function IsShiftLocked()
+	return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
 end
 
---// Get combat VFX/SFX based on fighting style
-local function GetEffects(Character)
-	local FightingStyle = Character:GetAttribute("FightingStyle")
-	local CombatVFX = VFXFolder:FindFirstChild(FightingStyle)
-	local CombatSFX = SFXFolder:FindFirstChild(FightingStyle)
+--// Animation replication handler (Block)
+AnimationHandlers.Block = function(data)
+	local character = data.Character
+	local state = data.State
+	if not character then return end
 
-	return CombatVFX, CombatSFX
-end
+	local animator = getAnimator(character)
+	if not animator then return end
 
---// Fire animation event (client-specific or global)
-local function FireAnimation(character, action, data)
-	data = data or {}
-	data.Character = character
+	local style = character:GetAttribute("FightingStyle")
+	if not style then return end
 
-	local player = Players:GetPlayerFromCharacter(character)
+	local animFolder = ReplicatedFirst.Animations.Combat.FightingStyles:FindFirstChild(style)
+	if not animFolder then return end
 
-	if player then
-		AnimationEvent:FireClient(player, action, data)
+	local anim = animFolder:FindFirstChild("Block")
+	if not anim then return end
+
+	ActiveTracks[character] = ActiveTracks[character] or {}
+
+	if state then
+		if ActiveTracks[character].Block then return end
+
+		local track = animator:LoadAnimation(anim)
+		track.Priority = Enum.AnimationPriority.Action
+		track.Looped = true
+		track:Play()
+
+		ActiveTracks[character].Block = track
 	else
-		AnimationEvent:FireAllClients(action, data)
+		local track = ActiveTracks[character].Block
+		if track then
+			track:Stop(0.15)
+			track:Destroy()
+			ActiveTracks[character].Block = nil
+		end
 	end
 end
 
-----------------------------------------------------------------
--- M1 COMBO ATTACK
-----------------------------------------------------------------
-function CombatModule.M1(character, enemy, stage)
-	if not character then return end
+--// Central animation dispatcher
+AnimationEvent.OnClientEvent:Connect(function(action, data)
+	local handler = AnimationHandlers[action]
+	if handler then
+		handler(data)
+	else
+		warn("No animation handler for:", action)
+	end
+end)
 
-	local now = os.clock()
-	local active = ensureTable(activeAttacks, character)
-
-	-- Get fighting style data
-	local Style = FightingStyles.Styles[character:GetAttribute("FightingStyle")]
-	if not Style then return end
-
-	----------------------------------------------------------------
-	-- START PHASE
-	----------------------------------------------------------------
-	if stage == "Start" then
-		if not CombatChecks.CanM1(character) then return end
-
-		-- Track last attack time for combo reset
-		lastTimedAttack[character] = now
-
-		-- Heartbeat-based combo reset after inactivity
-		if not resetTimers[character] then
-			resetTimers[character] = RunService.Heartbeat:Connect(function()
-				if os.clock() - lastTimedAttack[character] > 2 then
-					character:SetAttribute("Combo", 1)
-					resetTimers[character]:Disconnect()
-					resetTimers[character] = nil
-				end
-			end)
+--// Auto-repeat M1 while holding punch input
+task.spawn(function()
+	while task.wait() do
+		if Punching then
+			ClientModule.M1()
 		end
+	end
+end)
 
-		-- Resolve combo index
-		local Combo = character:GetAttribute("Combo") or 1
-		local M1_Data = Style.M1_Data[Combo]
+--// Rebind all character-dependent references on respawn
+local function bindCharacter(char)
+	character = char
+	humanoid = character:WaitForChild("Humanoid")
+	Animator = humanoid:WaitForChild("Animator")
+	HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
 
-		-- Fallback if combo index invalid
-		if not M1_Data then
-			Combo = 1
-			M1_Data = Style.M1_Data[Combo]
-		end
+	Attacking = false
+	Punching = false
+end
 
-		local FightingStyle = character:GetAttribute("FightingStyle")
+--// Spawn rock trail during dash movement
+local function TrySpawnDashTrail()
+	if not Dashing or not dashBV then return end
+	if dashBV.Velocity.Magnitude < 1 then return end
 
-		-- Play swing SFX
-		Remotes.Visuals.SFXEvent:FireAllClients(
-			"Swing",
-			character:FindFirstChild("HumanoidRootPart"),
-			Combo,
-			FightingStyle
-		)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.IgnoreWater = true
+	rayParams.FilterDescendantsInstances = { character }
 
-		-- Apply cooldowns and restrictions
-		AddAttribute(character, "M1_CD", M1_Data.M1_CD)
-		character:SetAttribute("NoJump", M1_Data.NoJump)
+	local origin = HumanoidRootPart.Position
+	local ray = workspace:Raycast(origin, Vector3.new(0, -12, 0), rayParams)
+	if not ray then return end
 
-		active.M1 = now
+	local groundPos = ray.Position - Vector3.new(0, 0.15, 0)
+	if lastTrailPos and (groundPos - lastTrailPos).Magnitude < TRAIL_SPACING then return end
+	lastTrailPos = groundPos
 
-		-- Advance combo and handle finisher
-		Combo += 1
-		if Combo > 4 then
-			AddAttribute(character, "Guardbroken", 0.8)
-			Combo = 1
-		end
+	local cf = CFrame.lookAt(groundPos, groundPos + dashBV.Velocity.Unit)
 
-		character:SetAttribute("Combo", Combo)
+	RockModule.Trail(cf, TRAIL_SPACING, 1, 2, 0.35, false, {
+		Material = ray.Instance.Material,
+		Color = ray.Instance.Color
+	})
+end
 
-	----------------------------------------------------------------
-	-- HIT PHASE
-	----------------------------------------------------------------
-	elseif stage == "Hit" then
-		if character:GetAttribute("Hitstun") > 0 then return end
-		if not active.M1 or now - active.M1 > 0.6 then return end
+--// Stop trail emission and cleanup
+local function StopDashTrail()
+	trailActive = false
+	if dashTrailConn then
+		dashTrailConn:Disconnect()
+		dashTrailConn = nil
+	end
+end
 
-		active.M1 = nil
+--// Determine finisher based on jump / fall state
+local function checkFinal()
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
 
-		local ComboAtHit = character:GetAttribute("Combo")
-		local IsFinalM1 = (ComboAtHit == 1)
+	local spaceHeld = humanoid.Jump
+	local mouseHeld = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+	local falling = humanoid:GetState() == Enum.HumanoidStateType.Freefall
 
-		local CharHRP = character:FindFirstChild("HumanoidRootPart")
-		if not CharHRP then return end
+	if spaceHeld and mouseHeld and not falling then
+		return "Uppercut"
+	end
 
-		-- Resolve correct hit data
-		local M1_Data = IsFinalM1
-			and Style.M1_Data[4]
-			or Style.M1_Data[ComboAtHit - 1]
+	if falling then
+		return "Downslam"
+	end
+end
 
-		if not M1_Data then return end
+--// Primary melee attack (M1 / combo system)
+function ClientModule.M1()
+	if not CombatChecks.CanM1(character) then return end
+	if Attacking then return end
 
-		local FightingStyle = character:GetAttribute("FightingStyle")
-		local CombatVFX, CombatSFX = GetEffects(character)
+	local combo = character:GetAttribute("Combo") or 1
+	local styleFolder = FightingStyle:FindFirstChild(character:GetAttribute("FightingStyle"))
+	if not styleFolder then return end
 
-		-- Final hit bonus effects
-		if IsFinalM1 then
-			character:SetAttribute("Guardbroken", 0)
-			AddAttribute(character, "Sprint_CD", 0.15)
-		end
+	Attacking = true
 
-		-- Apply hit to all enemies
-		ForEachEnemy(enemy, function(enemy)
-			if not enemy:FindFirstChild("Humanoid") then return end
-			if CombatChecks.CanDamage(enemy) then return end
+	--// Combo finisher handling
+	if combo == 4 then
+		local finisher = checkFinal()
+		if finisher then
+			local anim = styleFolder:FindFirstChild(finisher)
+			if not anim then Attacking = false return end
 
-			local EnemyHRP = enemy:FindFirstChild("HumanoidRootPart")
-			local EnemyHumanoid = enemy:FindFirstChild("Humanoid")
-			if not EnemyHRP or not EnemyHumanoid then return end
+			local track = Animator:LoadAnimation(anim)
+			Disconnect(finisher)
+			track:Play(nil, nil, 1.1)
 
-			-- Direction and block check
-			local Direction = (EnemyHRP.Position - CharHRP.Position).Unit
-			local DotProduct = EnemyHRP.CFrame.LookVector:Dot(Direction)
-			local isBlocking = enemy:GetAttribute("Blocking")
+			InputEvent:InvokeServer(finisher, { Stage = "Start" })
 
-			if isBlocking and DotProduct < 0.3 then
-				Remotes.Visuals.SFXEvent:FireAllClients(
-					"BlockHit",
-					EnemyHRP,
-					ComboAtHit,
-					FightingStyle
-				)
-				return
-			end
-
-			-- Break block if hit from behind
-			if isBlocking then
-				CombatModule.Unblock(enemy)
-			end
-
-			-- Damage + hitstun
-			EnemyHumanoid:TakeDamage(M1_Data.Damage or 5)
-			enemy:SetAttribute("Hitstun", M1_Data.Hitstun)
-
-			-- VFX / knockback
-			if IsFinalM1 then
-				local VFX = CombatVFX.FinalM1:Clone()
-				VFX.Parent = EnemyHRP
-
-				Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
-				Remotes.Visuals.SFXEvent:FireAllClients("Punch", EnemyHRP, 1, FightingStyle)
-
-				Knockback.Standard(
-					EnemyHRP,
-					(Direction * 30) + Vector3.new(0, 20, 0),
-					0.25,
-					1,
-					Vector3.new(40000, 40000, 40000)
-				)
-			else
-				local VFX = CombatVFX.M1:Clone()
-				VFX.Parent = EnemyHRP
-
-				Remotes.Visuals.VFXEvent:FireAllClients("Play", VFX, 0.3)
-				Remotes.Visuals.SFXEvent:FireAllClients("Punch", EnemyHRP, ComboAtHit, FightingStyle)
-
-				Knockback.Standard(
-					EnemyHRP,
-					Direction * 10,
-					0.25,
+			Connections[finisher] = track:GetMarkerReachedSignal("Hit"):Connect(function()
+				HitboxModule.CreateHitbox(
+					HumanoidRootPart,
+					CFrame.new(0, 0, -2.5),
+					Vector3.new(4, 5, 5),
+					0.15,
+					false,
 					nil,
-					Vector3.new(2000, 0, 20000)
+					function(enemies)
+						if enemies and #enemies > 0 then
+							InputEvent:InvokeServer(finisher, { Enemy = enemies, Stage = "Hit" })
+						end
+					end
 				)
-			end
+			end)
 
-			-- Small self-lunge
-			Knockback.Standard(
-				CharHRP,
-				CharHRP.CFrame.LookVector * 10,
-				0.25,
-				nil,
-				Vector3.new(2000, 0, 20000)
-			)
-		end)
+			SprintModule.SuppressSprint(true)
+			track.Stopped:Connect(function() Attacking = false end)
+			return
+		end
 	end
+
+	--// Standard combo attack
+	local anim = styleFolder:FindFirstChild(combo)
+	if not anim then Attacking = false return end
+
+	local track = Animator:LoadAnimation(anim)
+	Disconnect("M1")
+	track:Play(nil, nil, 1)
+
+	InputEvent:InvokeServer("M1", { Enemy = nil, Stage = "Start" })
+
+	Connections.M1 = track:GetMarkerReachedSignal("Hit"):Connect(function()
+		HitboxModule.CreateHitbox(
+			HumanoidRootPart,
+			CFrame.new(0, 0, -2.5),
+			Vector3.new(4, 5, 5),
+			0.15,
+			false,
+			nil,
+			function(enemies)
+				if enemies and #enemies > 0 then
+					InputEvent:InvokeServer("M1", { Enemy = enemies, Stage = "Hit" })
+				end
+			end
+		)
+	end)
+
+	track.Stopped:Connect(function() Attacking = false end)
 end
 
-----------------------------------------------------------------
--- BLOCK / UNBLOCK
-----------------------------------------------------------------
-function CombatModule.Block(character, stage)
-	if not character then return end
-
-	character:SetAttribute("Blocking", stage)
-
-	FireAnimation(character, "Block", {
-		State = stage
-	})
-end
-
-function CombatModule.Unblock(character)
-	if not character then return end
-	if not character:GetAttribute("Blocking") then return end
-
-	character:SetAttribute("Blocking", false)
-
-	FireAnimation(character, "Block", {
-		State = false
-	})
-end
-
---// Return module
-return CombatModule
 
