@@ -1,571 +1,712 @@
 --// Core character references (bound on spawn / respawn)
 local character
 local humanoid
-local Animator
-local HumanoidRootPart
-local BlockAnimTrack
+local animator
+local humanoidRootPart
+local blockAnimationTrack
 
 --// Roblox services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
-local ServerStorage = game:GetService("ServerStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local PhysicsService = game:GetService("PhysicsService")
 
 --// Combat-related modules
 local CombatChecks = require(ReplicatedStorage.Modules.Combat.CombatChecks)
-local Knockback = require(ReplicatedStorage.Modules.Combat.Knockback)
 local HitboxModule = require(ReplicatedStorage.Modules.Combat.Hitbox)
+
+--// Helper / movement / visual modules
+local SprintModule = require(ReplicatedStorage.Modules.Movement.SprintModule)
+local RockModule = require(ReplicatedStorage.Modules.Visuals.RockModule)
 
 --// Networking
 local Remotes = ReplicatedStorage.Remotes
 local InputEvent = Remotes.Combat.Input
-local CheckCooldown = Remotes.Other.CheckCooldown
 local AnimationEvent = Remotes.Animation.AnimationEvent
-
---// Helper / movement / visual modules
-local CooldownModule = require(ReplicatedStorage.Modules.Helpers.CooldownModule)
-local SprintModule = require(ReplicatedStorage.Modules.Movement.SprintModule)
-local RockModule = require(ReplicatedStorage.Modules.Visuals.RockModule)
+local CheckCooldownRemote = Remotes.Other.CheckCooldown
 
 --// Player references
 local player = Players.LocalPlayer
-local playerGui = player.PlayerGui
-local Mouse = player:GetMouse()
-
---// Initial character binding
-character = player.Character or player.CharacterAdded:Wait()
-HumanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-humanoid = character:FindFirstChild("Humanoid")
-Animator = humanoid:FindFirstChild("Animator")
 
 --// Animation folders
-local Animations = ReplicatedFirst.Animations
-local Combat = Animations.Combat
-local FightingStyle = Combat.FightingStyles
-local Dashes = Combat.Dashes
+local animations = ReplicatedFirst.Animations
+local combatAnimations = animations.Combat
+local fightingStyleAnimations = combatAnimations.FightingStyles
+local dashAnimations = combatAnimations.Dashes
 
 --// Dash tuning constants
 local DASH_START_SPEED = 60
 local DASH_DECAY_RATE = 60
+local SIDE_DASH_SPEED = 45
 local BACK_DASH_PAUSE = 0.08
 local BACK_DASH_BOOST = 1.0
-
---// Dash state
-local secondFlipUsed = false
-local Dashing = false
-local dashBV
-local dashConn
-local healthConn
-
---// Dash trail state
-local dashTrailConn
-local trailActive = false
-local lastTrailPos = nil
-local TRAIL_SPACING = 2
-
---// Combat state
-local Attacking = false
-local Punching = false
+local DASH_TRAIL_SPACING = 2
+local DASH_HITBOX_OFFSET = CFrame.new(0, 0, -2.5)
+local DASH_HITBOX_SIZE = Vector3.new(4, 5, 5)
+local M1_HITBOX_OFFSET = CFrame.new(0, 0, -2.5)
+local M1_HITBOX_SIZE = Vector3.new(4, 5, 5)
 
 --// Direction validation tables
-local FrontBackDirections = { Front = true, Back = true }
-local LeftRightDirections = { Left = true, Right = true }
+local FrontBackDirections = {
+	Front = true,
+	Back = true,
+}
+
+local LeftRightDirections = {
+	Left = true,
+	Right = true,
+}
+
+--// Client state
+local isAttacking = false
+local isPunching = false
+local isDashing = false
+local secondFlipUsed = false
+local lastTrailPosition
+
+--// Runtime objects
+local dashBodyVelocity
+local blockReplicationTracks = {}
+
+--// Runtime connections
+local connections = {}
 
 --// Client module
 local ClientModule = {}
 
---// Runtime connections & animation tracking
-local Connections = {}
-local AnimationHandlers = {}
-local ActiveTracks = {}
-
 --// Utility to safely disconnect named connections
-local function Disconnect(name)
-	if Connections[name] then
-		Connections[name]:Disconnect()
-		Connections[name] = nil
+local function disconnectConnection(name)
+	local connection = connections[name]
+	if not connection then
+		return
+	end
+
+	connection:Disconnect()
+	connections[name] = nil
+end
+
+--// Utility to safely stop and clear named connections
+local function clearConnectionGroup(...)
+	for _, name in ipairs({ ... }) do
+		disconnectConnection(name)
 	end
 end
 
 --// Fetch animator from any character instance
-local function getAnimator(character)
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return end
-	return humanoid:FindFirstChildOfClass("Animator")
+local function getAnimatorFromCharacter(targetCharacter)
+	local targetHumanoid = targetCharacter and targetCharacter:FindFirstChildOfClass("Humanoid")
+	if not targetHumanoid then
+		return nil
+	end
+
+	return targetHumanoid:FindFirstChildOfClass("Animator")
 end
 
 --// Check shift-lock camera state
-local function IsShiftLocked()
+local function isShiftLocked()
 	return UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
 end
 
---// Animation replication handler (Block)
-AnimationHandlers.Block = function(data)
-	local character = data.Character
-	local state = data.State
-	if not character then return end
-
-	local animator = getAnimator(character)
-	if not animator then return end
-
-	local style = character:GetAttribute("FightingStyle")
-	if not style then return end
-
-	local animFolder = ReplicatedFirst.Animations.Combat.FightingStyles:FindFirstChild(style)
-	if not animFolder then return end
-
-	local anim = animFolder:FindFirstChild("Block")
-	if not anim then return end
-
-	ActiveTracks[character] = ActiveTracks[character] or {}
-
-	if state then
-		if ActiveTracks[character].Block then return end
-
-		local track = animator:LoadAnimation(anim)
-		track.Priority = Enum.AnimationPriority.Action
-		track.Looped = true
-		track:Play()
-
-		ActiveTracks[character].Block = track
-	else
-		local track = ActiveTracks[character].Block
-		if track then
-			track:Stop(0.15)
-			track:Destroy()
-			ActiveTracks[character].Block = nil
-		end
+--// Resolve current fighting style animation folder
+local function getCurrentStyleFolder()
+	if not character then
+		return nil
 	end
+
+	local styleName = character:GetAttribute("FightingStyle")
+	if not styleName then
+		return nil
+	end
+
+	return fightingStyleAnimations:FindFirstChild(styleName)
 end
 
---// Central animation dispatcher
-AnimationEvent.OnClientEvent:Connect(function(action, data)
-	local handler = AnimationHandlers[action]
-	if handler then
-		handler(data)
-	else
-		warn("No animation handler for:", action)
-	end
-end)
-
---// Auto-repeat M1 while holding punch input
-task.spawn(function()
-	while task.wait() do
-		if Punching then
-			ClientModule.M1()
+--// Create a standard combat hitbox
+local function createCombatHitbox(rootPart, offset, size, actionName)
+	HitboxModule.CreateHitbox(rootPart, offset, size, 0.15, false, nil, function(enemies)
+		if enemies and #enemies > 0 then
+			InputEvent:InvokeServer(actionName, {
+				Enemy = enemies,
+				Stage = "Hit",
+			})
 		end
-	end
-end)
+	end)
+end
 
---// Rebind all character-dependent references on respawn
-local function bindCharacter(char)
-	character = char
-	humanoid = character:WaitForChild("Humanoid")
-	Animator = humanoid:WaitForChild("Animator")
-	HumanoidRootPart = character:WaitForChild("HumanoidRootPart")
-
-	Attacking = false
-	Punching = false
+--// Stop trail emission and cleanup
+local function stopDashTrail()
+	disconnectConnection("DashTrail")
+	lastTrailPosition = nil
 end
 
 --// Spawn rock trail during dash movement
-local function TrySpawnDashTrail()
-	if not Dashing or not dashBV then return end
-	if dashBV.Velocity.Magnitude < 1 then return end
+local function trySpawnDashTrail()
+	if not isDashing or not dashBodyVelocity or not humanoidRootPart then
+		return
+	end
+
+	if dashBodyVelocity.Velocity.Magnitude < 1 then
+		return
+	end
 
 	local rayParams = RaycastParams.new()
 	rayParams.FilterType = Enum.RaycastFilterType.Exclude
 	rayParams.IgnoreWater = true
 	rayParams.FilterDescendantsInstances = { character }
 
-	local origin = HumanoidRootPart.Position
-	local ray = workspace:Raycast(origin, Vector3.new(0, -12, 0), rayParams)
-	if not ray then return end
+	local rayResult = workspace:Raycast(humanoidRootPart.Position, Vector3.new(0, -12, 0), rayParams)
+	if not rayResult then
+		return
+	end
 
-	local groundPos = ray.Position - Vector3.new(0, 0.15, 0)
-	if lastTrailPos and (groundPos - lastTrailPos).Magnitude < TRAIL_SPACING then return end
-	lastTrailPos = groundPos
+	local groundPosition = rayResult.Position - Vector3.new(0, 0.15, 0)
+	if lastTrailPosition and (groundPosition - lastTrailPosition).Magnitude < DASH_TRAIL_SPACING then
+		return
+	end
 
-	local cf = CFrame.lookAt(groundPos, groundPos + dashBV.Velocity.Unit)
+	lastTrailPosition = groundPosition
 
-	RockModule.Trail(cf, TRAIL_SPACING, 1, 2, 0.35, false, {
-		Material = ray.Instance.Material,
-		Color = ray.Instance.Color
+	local direction = dashBodyVelocity.Velocity.Unit
+	local trailCFrame = CFrame.lookAt(groundPosition, groundPosition + direction)
+
+	RockModule.Trail(trailCFrame, DASH_TRAIL_SPACING, 1, 2, 0.35, false, {
+		Material = rayResult.Instance.Material,
+		Color = rayResult.Instance.Color,
 	})
 end
 
---// Stop trail emission and cleanup
-local function StopDashTrail()
-	trailActive = false
-	if dashTrailConn then
-		dashTrailConn:Disconnect()
-		dashTrailConn = nil
-	end
-end
-
 --// Determine finisher based on jump / fall state
-local function checkFinal()
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then return end
+local function getComboFinisher()
+	if not humanoid then
+		return nil
+	end
 
-	local spaceHeld = humanoid.Jump
-	local mouseHeld = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-	local falling = humanoid:GetState() == Enum.HumanoidStateType.Freefall
+	local isJumpHeld = humanoid.Jump
+	local isMouseHeld = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+	local isFalling = humanoid:GetState() == Enum.HumanoidStateType.Freefall
 
-	if spaceHeld and mouseHeld and not falling then
+	if isJumpHeld and isMouseHeld and not isFalling then
 		return "Uppercut"
 	end
 
-	if falling then
+	if isFalling then
 		return "Downslam"
 	end
+
+	return nil
+end
+
+--// Convert yaw to forward vector
+local function forwardFromYaw(yaw)
+	return Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
+end
+
+--// Resolve dash direction from camera / character state
+local function getDashDirection(direction, allowCameraSteer)
+	local camera = workspace.CurrentCamera
+	if not camera or not humanoidRootPart then
+		return nil
+	end
+
+	if allowCameraSteer then
+		local lookVector = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+		local rightVector = Vector3.new(camera.CFrame.RightVector.X, 0, camera.CFrame.RightVector.Z)
+
+		if lookVector.Magnitude == 0 or rightVector.Magnitude == 0 then
+			return nil
+		end
+
+		lookVector = lookVector.Unit
+		rightVector = rightVector.Unit
+
+		if direction == "Front" then
+			return lookVector
+		elseif direction == "Back" then
+			return -lookVector
+		elseif direction == "Right" then
+			return rightVector
+		elseif direction == "Left" then
+			return -rightVector
+		end
+	end
+
+	local lookVector = humanoidRootPart.CFrame.LookVector
+	local flattenedLook = Vector3.new(lookVector.X, 0, lookVector.Z)
+	if flattenedLook.Magnitude == 0 then
+		return nil
+	end
+
+	return flattenedLook.Unit
+end
+
+--// Full dash cleanup
+local function cancelDash(state)
+	if state.cancelling then
+		return
+	end
+
+	state.cancelling = true
+
+	if not isDashing then
+		return
+	end
+
+	isDashing = false
+	secondFlipUsed = false
+
+	clearConnectionGroup("DashLoop", "DashHealth", "DashTrail")
+
+	if dashBodyVelocity then
+		dashBodyVelocity:Destroy()
+		dashBodyVelocity = nil
+	end
+
+	if state.animationTrack and state.animationTrack.IsPlaying then
+		state.animationTrack:Stop(0.1)
+	end
+
+	if humanoid then
+		humanoid.AutoRotate = state.originalAutoRotate
+	end
+
+	lastTrailPosition = nil
+end
+
+--// Animation replication handler (Block)
+local function handleBlockReplication(data)
+	local targetCharacter = data and data.Character
+	local shouldBlock = data and data.State
+	if not targetCharacter then
+		return
+	end
+
+	local targetAnimator = getAnimatorFromCharacter(targetCharacter)
+	if not targetAnimator then
+		return
+	end
+
+	local styleName = targetCharacter:GetAttribute("FightingStyle")
+	if not styleName then
+		return
+	end
+
+	local styleFolder = fightingStyleAnimations:FindFirstChild(styleName)
+	local blockAnimation = styleFolder and styleFolder:FindFirstChild("Block")
+	if not blockAnimation then
+		return
+	end
+
+	if shouldBlock then
+		if blockReplicationTracks[targetCharacter] then
+			return
+		end
+
+		local track = targetAnimator:LoadAnimation(blockAnimation)
+		track.Priority = Enum.AnimationPriority.Action
+		track.Looped = true
+		track:Play()
+		blockReplicationTracks[targetCharacter] = track
+		return
+	end
+
+	local existingTrack = blockReplicationTracks[targetCharacter]
+	if existingTrack then
+		existingTrack:Stop(0.15)
+		existingTrack:Destroy()
+		blockReplicationTracks[targetCharacter] = nil
+	end
+end
+
+--// Central animation dispatcher
+AnimationEvent.OnClientEvent:Connect(function(action, data)
+	if action == "Block" then
+		handleBlockReplication(data)
+	else
+		warn("No animation handler for:", action)
+	end
+end)
+
+--// Rebind all character-dependent references on respawn
+local function bindCharacter(newCharacter)
+	character = newCharacter
+	humanoid = newCharacter:WaitForChild("Humanoid")
+	animator = humanoid:WaitForChild("Animator")
+	humanoidRootPart = newCharacter:WaitForChild("HumanoidRootPart")
+
+	isAttacking = false
+	isPunching = false
+	isDashing = false
+	secondFlipUsed = false
+	lastTrailPosition = nil
+	blockAnimationTrack = nil
+
+	if dashBodyVelocity then
+		dashBodyVelocity:Destroy()
+		dashBodyVelocity = nil
+	end
+
+	clearConnectionGroup("M1", "DashLoop", "DashHealth", "DashTrail")
+end
+
+--// Play a combo animation and attach the hit marker callback
+local function playComboAnimation(animationObject, actionName, playbackSpeed, onComplete)
+	local track = animator:LoadAnimation(animationObject)
+	track:Play(nil, nil, playbackSpeed)
+
+	InputEvent:InvokeServer(actionName, {
+		Enemy = nil,
+		Stage = "Start",
+	})
+
+	disconnectConnection("M1")
+	connections.M1 = track:GetMarkerReachedSignal("Hit"):Connect(function()
+		createCombatHitbox(humanoidRootPart, M1_HITBOX_OFFSET, M1_HITBOX_SIZE, actionName)
+	end)
+
+	track.Stopped:Connect(function()
+		isAttacking = false
+		if onComplete then
+			onComplete()
+		end
+	end)
 end
 
 --// Primary melee attack (M1 / combo system)
 function ClientModule.M1()
-	if not CombatChecks.CanM1(character) then return end
-	if Attacking then return end
+	if not CombatChecks.CanM1(character) then
+		return
+	end
+
+	if isAttacking then
+		return
+	end
 
 	local combo = character:GetAttribute("Combo") or 1
-	local styleFolder = FightingStyle:FindFirstChild(character:GetAttribute("FightingStyle"))
-	if not styleFolder then return end
+	local styleFolder = getCurrentStyleFolder()
+	if not styleFolder then
+		return
+	end
 
-	Attacking = true
+	isAttacking = true
 
 	--// Combo finisher handling
 	if combo == 4 then
-		local finisher = checkFinal()
-		if finisher then
-			local anim = styleFolder:FindFirstChild(finisher)
-			if not anim then Attacking = false return end
+		local finisherName = getComboFinisher()
+		if finisherName then
+			local finisherAnimation = styleFolder:FindFirstChild(finisherName)
+			if not finisherAnimation then
+				isAttacking = false
+				return
+			end
 
-			local track = Animator:LoadAnimation(anim)
-			Disconnect(finisher)
-			track:Play(nil, nil, 1.1)
+			local finisherTrack = animator:LoadAnimation(finisherAnimation)
+			finisherTrack:Play(nil, nil, 1.1)
 
-			InputEvent:InvokeServer(finisher, { Stage = "Start" })
+			InputEvent:InvokeServer(finisherName, {
+				Stage = "Start",
+			})
 
-			Connections[finisher] = track:GetMarkerReachedSignal("Hit"):Connect(function()
-				HitboxModule.CreateHitbox(
-					HumanoidRootPart,
-					CFrame.new(0, 0, -2.5),
-					Vector3.new(4, 5, 5),
-					0.15,
-					false,
-					nil,
-					function(enemies)
-						if enemies and #enemies > 0 then
-							InputEvent:InvokeServer(finisher, { Enemy = enemies, Stage = "Hit" })
-						end
-					end
-				)
+			disconnectConnection(finisherName)
+			connections[finisherName] = finisherTrack:GetMarkerReachedSignal("Hit"):Connect(function()
+				createCombatHitbox(humanoidRootPart, M1_HITBOX_OFFSET, M1_HITBOX_SIZE, finisherName)
 			end)
 
 			SprintModule.SuppressSprint(true)
-			track.Stopped:Connect(function() Attacking = false end)
+			finisherTrack.Stopped:Connect(function()
+				isAttacking = false
+			end)
 			return
 		end
 	end
 
 	--// Standard combo attack
-	local anim = styleFolder:FindFirstChild(combo)
-	if not anim then Attacking = false return end
-
-	local track = Animator:LoadAnimation(anim)
-	Disconnect("M1")
-	track:Play(nil, nil, 1)
-
-	InputEvent:InvokeServer("M1", { Enemy = nil, Stage = "Start" })
-
-	Connections.M1 = track:GetMarkerReachedSignal("Hit"):Connect(function()
-		HitboxModule.CreateHitbox(
-			HumanoidRootPart,
-			CFrame.new(0, 0, -2.5),
-			Vector3.new(4, 5, 5),
-			0.15,
-			false,
-			nil,
-			function(enemies)
-				if enemies and #enemies > 0 then
-					InputEvent:InvokeServer("M1", { Enemy = enemies, Stage = "Hit" })
-				end
-			end
-		)
-	end)
-
-	track.Stopped:Connect(function() Attacking = false end)
-end
-
-function ClientModule.Dash(Direction, isIdleDash)
-	--// Direction classification
-	local isFrontBack = FrontBackDirections[Direction] == true
-	local isLeftRight = FrontBackDirections[Direction] == true
-	local Camera = workspace.CurrentCamera
-
-	--// Global dash checks
-	if not CombatChecks.CanDash(character) then return end
-	if Attacking and isFrontBack then return end
-	if Dashing then return end
-
-	--// Cooldown routing based on dash axis
-	local isForward = (Direction == "Front" or Direction == "Back")
-	local OnCD 
-
-	if isForward then
-		OnCD = Remotes.Other.CheckCooldown:InvokeServer(character.Name, "Forward")
-		if OnCD then return end
-	else
-		OnCD = Remotes.Other.CheckCooldown:InvokeServer(character.Name, "Side")
-		if OnCD then return end
+	local comboAnimation = styleFolder:FindFirstChild(combo)
+	if not comboAnimation then
+		isAttacking = false
+		return
 	end
 
-	--// Character validation
-	local Humanoid = character:FindFirstChild("Humanoid")
-	if not Humanoid then return end
+	playComboAnimation(comboAnimation, "M1", 1)
+end
 
-	--// Fetch dash animations
-	local DashAnim = ReplicatedFirst.Animations.Combat.Dashes:FindFirstChild(Direction)
-	local FrontHit = ReplicatedFirst.Animations.Combat.Dashes.FrontHit
-	if not DashAnim or not FrontHit then return end
+--// Dash handler
+function ClientModule.Dash(direction)
+	local isFrontBack = FrontBackDirections[direction] == true
+	local isLeftRight = LeftRightDirections[direction] == true
+	local isValidDirection = isFrontBack or isLeftRight
+
+	if not isValidDirection then
+		return
+	end
+
+	if not CombatChecks.CanDash(character) then
+		return
+	end
+
+	if isAttacking and isFrontBack then
+		return
+	end
+
+	if isDashing then
+		return
+	end
+
+	local cooldownKey = isFrontBack and "Forward" or "Side"
+	local onCooldown = CheckCooldownRemote:InvokeServer(character.Name, cooldownKey)
+	if onCooldown then
+		return
+	end
+
+	if not humanoid or not animator or not humanoidRootPart then
+		return
+	end
+
+	local dashAnimation = dashAnimations:FindFirstChild(direction)
+	local frontHitAnimation = dashAnimations:FindFirstChild("FrontHit")
+	if not dashAnimation or not frontHitAnimation then
+		return
+	end
+
+	local dashStats = {
+		Front = {
+			Speed = DASH_START_SPEED,
+			CameraSteer = false,
+		},
+		Back = {
+			Speed = DASH_START_SPEED,
+			CameraSteer = true,
+		},
+		Left = {
+			Speed = SIDE_DASH_SPEED,
+			CameraSteer = true,
+		},
+		Right = {
+			Speed = SIDE_DASH_SPEED,
+			CameraSteer = true,
+		},
+	}
+
+	local stats = dashStats[direction]
+	if not stats then
+		return
+	end
 
 	--// Enter dash state
-	Dashing = true
+	isDashing = true
 	secondFlipUsed = false
+	lastTrailPosition = nil
+
+	local dashState = {
+		cancelling = false,
+		originalAutoRotate = humanoid.AutoRotate,
+		lockedYaw = nil,
+		animationTrack = nil,
+	}
 
 	--// Rotation locking for forward dash
-	local originalAutoRotate = Humanoid.AutoRotate
-	local lockedYaw
-
-	if Direction == "Front" then
-		Humanoid.AutoRotate = false
-		local _, yaw, _ = HumanoidRootPart.CFrame:ToEulerAnglesYXZ()
-		lockedYaw = yaw
+	if direction == "Front" then
+		humanoid.AutoRotate = false
+		local _, yaw = humanoidRootPart.CFrame:ToEulerAnglesYXZ()
+		dashState.lockedYaw = yaw
 	end
 
 	--// Play dash animation
-	local animTrack = Animator:LoadAnimation(DashAnim)
-	animTrack.Priority = Enum.AnimationPriority.Action
-	animTrack:Play(0.05, nil, 1.1)
+	local animationTrack = animator:LoadAnimation(dashAnimation)
+	animationTrack.Priority = Enum.AnimationPriority.Action
+	animationTrack:Play(0.05, nil, 1.1)
+	dashState.animationTrack = animationTrack
 
 	--// Notify server of dash start
 	InputEvent:InvokeServer("Dash", {
 		Stage = "Start",
-		Direction = Direction
+		Direction = direction,
 	})
 
-	--// Dash cancel conditions
-	local startHealth = Humanoid.Health
-	local cancelling = false
-
-	--// Full dash cleanup
-	local function cancelDash()
-		if cancelling then return end
-		cancelling = true
-		if not Dashing then return end
-
-		Dashing = false
-
-		if dashConn then dashConn:Disconnect() dashConn = nil end
-		if dashBV then dashBV:Destroy() dashBV = nil end
-		if healthConn then healthConn:Disconnect() healthConn = nil end
-		if animTrack and animTrack.IsPlaying then animTrack:Stop(0.1) end
-
-		Humanoid.AutoRotate = originalAutoRotate
-		lockedYaw = nil
-
-		StopDashTrail()
-	end
-
-	--// Cancel dash on damage
-	healthConn = Humanoid.HealthChanged:Connect(function(newHealth)
-		if newHealth < startHealth then
-			cancelDash()
-		end
-	end)
-
-	--// Dash tuning per direction
-	local DashStats = {
-		Front = { Speed = 60, CameraSteer = false },
-		Back  = { Speed = 60, CameraSteer = true },
-		Left  = { Speed = 45, CameraSteer = true },
-		Right = { Speed = 45, CameraSteer = true }
-	}
-
-	local Stats = DashStats[Direction]
-	local dashDir
-
 	--// Initial dash direction resolution
-	local function GetInitialDashDirection()
-		if Stats.CameraSteer then
-			local camForward = Vector3.new(Camera.CFrame.LookVector.X, 0, Camera.CFrame.LookVector.Z).Unit
-			local camRight = Vector3.new(Camera.CFrame.RightVector.X, 0, Camera.CFrame.RightVector.Z).Unit
-
-			if Direction == "Front" then
-				return camForward
-			elseif Direction == "Back" then
-				return -camForward
-			elseif Direction == "Right" then
-				return camRight
-			elseif Direction == "Left" then
-				return -camRight
-			end
-		else
-			local look = HumanoidRootPart.CFrame.LookVector
-			return Vector3.new(look.X, 0, look.Z).Unit
-		end
-	end
-
-	--// Convert yaw to forward vector
-	local function ForwardFromYaw(yaw)
-		return Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
+	local dashDirection = getDashDirection(direction, stats.CameraSteer)
+	if not dashDirection then
+		cancelDash(dashState)
+		return
 	end
 
 	--// Initialize dash velocity
-	dashDir = GetInitialDashDirection()
+	dashBodyVelocity = Instance.new("BodyVelocity")
+	dashBodyVelocity.MaxForce = Vector3.new(50000, 0, 50000)
+	dashBodyVelocity.Velocity = dashDirection * stats.Speed
+	dashBodyVelocity.Parent = humanoidRootPart
 
-	dashBV = Instance.new("BodyVelocity")
-	dashBV.MaxForce = Vector3.new(50000, 0, 50000)
-	dashBV.Velocity = dashDir * DASH_START_SPEED
-	dashBV.Parent = HumanoidRootPart
+	local currentSpeed = stats.Speed
+	local startingHealth = humanoid.Health
 
-	local currentSpeed = DASH_START_SPEED
+	--// Cancel dash on damage
+	connections.DashHealth = humanoid.HealthChanged:Connect(function(newHealth)
+		if newHealth < startingHealth then
+			cancelDash(dashState)
+		end
+	end)
 
 	--// Dash movement loop
-	dashConn = RunService.RenderStepped:Connect(function(deltaTime)
-		if not Dashing or not dashBV or not dashDir then return end
-
-		--// Forward dash yaw locking
-		if Direction == "Front" and lockedYaw then
-			local pos = HumanoidRootPart.Position
-
-			if IsShiftLocked() then
-				local camLook = Camera.CFrame.LookVector
-				lockedYaw = math.atan2(-camLook.X, -camLook.Z)
-				dashDir = ForwardFromYaw(lockedYaw)
-			end
-
-			HumanoidRootPart.CFrame =
-				CFrame.new(pos) *
-				CFrame.fromOrientation(0, lockedYaw, 0)
-		end
-
-		--// Live camera steering
-		if Stats.CameraSteer then
-			dashDir = GetInitialDashDirection()
-		end
-
-		dashDir = Vector3.new(dashDir.X, 0, dashDir.Z).Unit
-		dashBV.Velocity = dashDir * currentSpeed
-
-		currentSpeed -= DASH_DECAY_RATE * deltaTime
-		if currentSpeed <= 0 then
-			cancelDash()
+	connections.DashLoop = RunService.RenderStepped:Connect(function(deltaTime)
+		if not isDashing or not dashBodyVelocity then
 			return
 		end
 
-		TrySpawnDashTrail()
+		--// Forward dash yaw locking
+		if direction == "Front" and dashState.lockedYaw then
+			local currentPosition = humanoidRootPart.Position
+
+			if isShiftLocked() then
+				local cameraLook = workspace.CurrentCamera.CFrame.LookVector
+				dashState.lockedYaw = math.atan2(-cameraLook.X, -cameraLook.Z)
+				dashDirection = forwardFromYaw(dashState.lockedYaw)
+			end
+
+			humanoidRootPart.CFrame = CFrame.new(currentPosition) * CFrame.fromOrientation(0, dashState.lockedYaw, 0)
+		end
+
+		--// Live camera steering
+		if stats.CameraSteer then
+			local updatedDirection = getDashDirection(direction, true)
+			if updatedDirection then
+				dashDirection = updatedDirection
+			end
+		end
+
+		if dashDirection.Magnitude == 0 then
+			cancelDash(dashState)
+			return
+		end
+
+		dashDirection = Vector3.new(dashDirection.X, 0, dashDirection.Z).Unit
+		dashBodyVelocity.Velocity = dashDirection * currentSpeed
+
+		currentSpeed -= DASH_DECAY_RATE * deltaTime
+		if currentSpeed <= 0 then
+			cancelDash(dashState)
+			return
+		end
+
+		trySpawnDashTrail()
 	end)
 
 	--// Dash impact window
-	animTrack:GetMarkerReachedSignal("End"):Connect(function()
-		if not Dashing then return end
+	animationTrack:GetMarkerReachedSignal("End"):Connect(function()
+		if not isDashing then
+			return
+		end
 
-		local HitTrack = Animator:LoadAnimation(FrontHit)
-		HitTrack.Priority = Enum.AnimationPriority.Action
-		HitTrack:Play(0.05, nil, 1.1)
+		local hitTrack = animator:LoadAnimation(frontHitAnimation)
+		hitTrack.Priority = Enum.AnimationPriority.Action
+		hitTrack:Play(0.05, nil, 1.1)
 
 		InputEvent:InvokeServer("Dash", {
 			Stage = "HitPoint",
-			Direction = Direction
+			Direction = direction,
 		})
 
-		HitboxModule.CreateHitbox(
-			HumanoidRootPart,
-			CFrame.new(0, 0, -2.5),
-			Vector3.new(4, 5, 5),
-			0.15,
-			false,
-			nil,
-			function(enemies)
-				if enemies and #enemies > 0 then
-					InputEvent:InvokeServer("Dash", {
-						Enemy = enemies,
-						Stage = "Hit"
-					})
-				end
-			end
-		)
+		createCombatHitbox(humanoidRootPart, DASH_HITBOX_OFFSET, DASH_HITBOX_SIZE, "Dash")
 	end)
 
 	--// Back dash flip logic
-	animTrack:GetMarkerReachedSignal("Back"):Connect(function()
-		if not Dashing then return end
-		if Direction ~= "Back" or secondFlipUsed then return end
+	animationTrack:GetMarkerReachedSignal("Back"):Connect(function()
+		if not isDashing then
+			return
+		end
+
+		if direction ~= "Back" or secondFlipUsed then
+			return
+		end
+
 		secondFlipUsed = true
 
-		if dashBV then dashBV.Velocity = Vector3.zero end
-		StopDashTrail()
+		if dashBodyVelocity then
+			dashBodyVelocity.Velocity = Vector3.zero
+		end
+
+		stopDashTrail()
 
 		task.delay(BACK_DASH_PAUSE, function()
-			if not Dashing then return end
-
-			dashDir = GetInitialDashDirection()
-			dashDir = Vector3.new(dashDir.X, 0, dashDir.Z).Unit
-			currentSpeed = DASH_START_SPEED * BACK_DASH_BOOST
-
-			if dashBV then
-				dashBV.Velocity = dashDir * currentSpeed
+			if not isDashing then
+				return
 			end
 
-			TrySpawnDashTrail()
+			local updatedDirection = getDashDirection(direction, true)
+			if not updatedDirection then
+				cancelDash(dashState)
+				return
+			end
+
+			dashDirection = Vector3.new(updatedDirection.X, 0, updatedDirection.Z).Unit
+			currentSpeed = DASH_START_SPEED * BACK_DASH_BOOST
+
+			if dashBodyVelocity then
+				dashBodyVelocity.Velocity = dashDirection * currentSpeed
+			end
+
+			trySpawnDashTrail()
 		end)
 	end)
 
 	--// Final cleanup on animation stop
-	animTrack.Stopped:Connect(cancelDash)
+	animationTrack.Stopped:Connect(function()
+		cancelDash(dashState)
+	end)
 end
 
-
+--// Block handler
 function ClientModule.Block()
 	--// Notify server of block start
-	InputEvent:InvokeServer("Block", { Stage = true })
+	InputEvent:InvokeServer("Block", {
+		Stage = true,
+	})
 
 	--// Resolve block animation from fighting style
-	local styleName = character:GetAttribute("FightingStyle")
-	local styleFolder = FightingStyle:FindFirstChild(styleName)
-	if not styleFolder then return end
-
-	local anim = styleFolder:FindFirstChild("Block")
-	if not anim then return end
-
-	--// Replace existing block animation
-	if BlockAnimTrack then
-		BlockAnimTrack:Stop(0.15)
-		BlockAnimTrack = nil
+	local styleFolder = getCurrentStyleFolder()
+	if not styleFolder then
+		return
 	end
 
-	BlockAnimTrack = Animator:LoadAnimation(anim)
-	Disconnect(anim)
+	local blockAnimation = styleFolder:FindFirstChild("Block")
+	if not blockAnimation then
+		return
+	end
 
-	BlockAnimTrack.Priority = Enum.AnimationPriority.Action
-	BlockAnimTrack:Play(0.1, nil, 1.1)
+	--// Replace existing block animation if needed
+	if blockAnimationTrack then
+		blockAnimationTrack:Stop(0.15)
+		blockAnimationTrack = nil
+	end
+
+	blockAnimationTrack = animator:LoadAnimation(blockAnimation)
+	blockAnimationTrack.Priority = Enum.AnimationPriority.Action
+	blockAnimationTrack.Looped = true
+	blockAnimationTrack:Play(0.1, nil, 1.1)
 end
 
-
+--// Unblock handler
 function ClientModule.Unblock()
 	--// Notify server of block end
-	InputEvent:InvokeServer("Block", { Stage = false })
+	InputEvent:InvokeServer("Block", {
+		Stage = false,
+	})
 
 	--// Stop local block animation
-	if BlockAnimTrack then
-		BlockAnimTrack:Stop(0.15)
-		BlockAnimTrack = nil
+	if blockAnimationTrack then
+		blockAnimationTrack:Stop(0.15)
+		blockAnimationTrack = nil
 	end
 end
 
+--// Auto-repeat M1 while holding punch input
+
+task.spawn(function()
+	while task.wait() do
+		if isPunching then
+			ClientModule.M1()
+		end
+	end
+end)
 
 --// Character lifecycle binding
 player.CharacterAdded:Connect(bindCharacter)
@@ -573,4 +714,6 @@ player.CharacterAdded:Connect(bindCharacter)
 if player.Character then
 	bindCharacter(player.Character)
 end
+
+return ClientModule
 
