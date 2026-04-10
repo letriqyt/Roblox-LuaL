@@ -9,7 +9,7 @@ local Debris = game:GetService("Debris")                         -- Automatic cl
 -- Data manager module (likely handles player data / stats)
 local DataManager = require(ReplicatedStorage.Modules.Data.DataManager)
 
--- Duplicate Debris reference (works but redundant)
+-- Duplicate Debris reference 
 local Debris = game:GetService("Debris")
 
 -- Assets folder (models, VFX, SFX, etc.)
